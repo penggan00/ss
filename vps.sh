@@ -1,5 +1,5 @@
 #!/bin/bash
-#bash <(curl -sL https://raw.githubusercontent.com/penggan00/penggan00.github.io/main/my-blog/sh/vps.sh) "ACCESS_TOKEN"
+#bash <(curl -sL https://raw.githubusercontent.com/penggan00/ss/main/vps.sh) "ACCESS_TOKEN"
 
 TOKEN="$1"
 echo "===== 开始配置 VPS ====="
@@ -97,7 +97,7 @@ sysctl -p /etc/sysctl.d/99-swap.conf
 
 # 安装BBR（可选）
 echo "正在安装BBR加速..."
-wget --no-check-certificate -O /opt/bbr.sh https://raw.githubusercontent.com/penggan00/penggan00.github.io/main/my-blog/sh/bbr.sh
+wget --no-check-certificate -O /opt/bbr.sh https://raw.githubusercontent.com/penggan00/ss/main/bbr.sh
 chmod +x /opt/bbr.sh
 /opt/bbr.sh
 
