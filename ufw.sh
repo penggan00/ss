@@ -1,52 +1,76 @@
 #!/bin/bash
+# UFW 一键配置脚本
+echo "alias docker-compose='docker compose'" >> ~/.bashrc && source ~/.bashrc
+# 修改SSH配置文件
+echo "修改SSH配置文件..."
+sed -i '/^#*PasswordAuthentication/c\PasswordAuthentication no' /etc/ssh/sshd_config
+sed -i '/^#*PubkeyAuthentication/c\PubkeyAuthentication yes' /etc/ssh/sshd_config
+sed -i '/^#*PermitRootLogin/c\PermitRootLogin prohibit-password' /etc/ssh/sshd_config
+sed -i '/^#*ChallengeResponseAuthentication/c\ChallengeResponseAuthentication no' /etc/ssh/sshd_config
 
-set -e  # 有错误立即退出
+# 确保222端口配置存在
+echo "配置SSH端口..."
+sed -i 's/^#Port 22$/Port 222/; s/^Port 22$/Port 222/; s/^#Port 222$/Port 222/' /etc/ssh/sshd_config
 
-echo "========================================"
-echo "开始配置UFW防火墙"
-echo "========================================"
+# 重启SSH服务
+echo "重启SSH服务..."
+systemctl restart sshd
+# 验证SSH配置
+echo "当前SSH配置:"
+grep -E "^(PasswordAuthentication|PubkeyAuthentication|PermitRootLogin|Port)" /etc/ssh/sshd_config
 
-# [1] 更新系统
-echo "[1/6] 更新系统并安装ufw..."
-sudo apt update -y
-sudo apt install ufw -y
+#新加坡时区
+apt-get update && apt-get install -y systemd-timesyncd
+timedatectl set-timezone Asia/Singapore && \
+timedatectl set-local-rtc 0 && \
+timedatectl set-ntp true && \
+echo "✅ 时区设置完成" && \
+timedatectl status
 
-# [2] 设置默认策略
-echo "[2/6] 设置默认策略..."
+echo "开始配置 UFW 防火墙..."
+
+# 1. 安装 UFW（如果未安装）
+sudo apt-get update
+sudo apt-get install -y ufw
+
+# 2. 重置 UFW 规则
+echo "重置 UFW 规则..."
 sudo ufw --force reset
+
+# 3. 设置默认策略
+echo "设置默认策略..."
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 
-# [3] 开放必要端口
-echo "[3/6] 配置防火墙规则..."
-echo "允许端口: 222/tcp (SSH), 80/tcp, 443/tcp, 53/udp, 123/udp"
+# 4. 开启 IPv6
+sudo sed -i 's/IPV6=no/IPV6=yes/' /etc/default/ufw
 
-sudo ufw allow 222/tcp comment 'SSH alternative port'
-sudo ufw allow 80/tcp comment 'HTTP'
-sudo ufw allow 443/tcp comment 'HTTPS'
-sudo ufw allow 53/udp comment 'DNS'
-sudo ufw allow 123/udp comment 'NTP'
-#sudo ufw allow 12000/tcp comment 'Custom port 12000'
+# 5. 允许指定端口（只开通 222、80、443）
+echo "添加允许的端口规则..."
+PORTS="222 80 443"
 
-# [4] 检查当前监听的端口
-echo "[4/6] 当前系统监听的端口:"
-sudo ss -tulnp | head -20
+for port in $PORTS; do
+    sudo ufw allow $port/tcp comment "TCP port $port"
+    echo "允许 TCP 端口: $port"
+done
 
-# [5] 启用UFW（自动确认）
-echo "[5/6] 启用UFW防火墙..."
-echo "注意：已允许SSH端口222，确保您使用此端口连接！"
-echo "y" | sudo ufw enable
-sudo systemctl enable ufw --now
+# 6. 启用 UFW
+echo "启用 UFW..."
+sudo ufw --force enable
 
-# [6] 显示结果
-echo "[6/6] UFW配置完成！"
-echo "========================================"
+# 7. 显示规则
+echo ""
+echo "当前 UFW 规则:"
 sudo ufw status numbered
-echo "========================================"
-echo "重要提醒："
-echo "1. 确保端口222可以访问，否则可能丢失SSH连接"
-echo "2. 如需修改规则：sudo ufw delete [规则号]"
-echo "3. 查看详细日志：sudo ufw status verbose"
-echo "4. 启用：sudo ufw allow 12000"
-echo "5. 启用：sudo ufw deny 12000"
-echo "6. 删除：sudo ufw delete allow 12000"
+
+echo ""
+echo "========================================="
+echo "UFW 配置完成！"
+echo "已开通端口: 222 (TCP), 80 (TCP), 443 (TCP)"
+echo "========================================="
+echo "常用命令:"
+echo "  sudo ufw status numbered  # 查看规则"
+echo "  sudo ufw delete 规则号    # 删除规则"
+echo "  sudo ufw allow 端口号     # 增加规则"
+echo "  sudo ufw disable          # 禁用防火墙"
+echo "  sudo ufw enable           # 启用防火墙"
