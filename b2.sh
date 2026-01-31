@@ -1,5 +1,5 @@
 #!/bin/bash
-# b2.sh - 支持多系统的安全安装脚本
+# b2.sh - 支持多系统的安全安装脚本（包含Alpine官方安装）
 
 # 使用环境变量传递密钥
 B2_ACCOUNT=${B2_ACCOUNT:-""}
@@ -101,67 +101,152 @@ install_dependencies() {
     esac
 }
 
+# 尝试Alpine官方仓库安装
+install_rclone_alpine_official() {
+    echo "尝试通过Alpine官方仓库安装rclone..."
+    
+    # 启用社区仓库（如果尚未启用）
+    if ! grep -q "^[^#]*community" /etc/apk/repositories; then
+        echo "启用Alpine社区仓库..."
+        ALPINE_VERSION=$(cat /etc/alpine-release | cut -d. -f1-2)
+        echo "http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" >> /etc/apk/repositories
+        $PKG_UPDATE
+    fi
+    
+    # 尝试从官方仓库安装
+    if $PKG_INSTALL rclone; then
+        echo "✓ 通过Alpine官方仓库安装成功"
+        return 0
+    else
+        echo "⚠ 官方仓库安装失败，尝试其他方法"
+        return 1
+    fi
+}
+
+# 尝试Alpine edge/testing仓库安装
+install_rclone_alpine_edge() {
+    echo "尝试通过Alpine edge仓库安装rclone..."
+    
+    # 启用edge/testing仓库
+    echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/repositories
+    echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories
+    $PKG_UPDATE
+    
+    if $PKG_INSTALL rclone; then
+        echo "✓ 通过Alpine edge仓库安装成功"
+        return 0
+    else
+        echo "⚠ Edge仓库安装失败"
+        # 移除edge仓库以避免影响系统稳定性
+        sed -i '/edge\/testing/d' /etc/apk/repositories
+        sed -i '/edge\/community/d' /etc/apk/repositories
+        $PKG_UPDATE
+        return 1
+    fi
+}
+
+# 手动下载安装rclone（Alpine专用）
+install_rclone_alpine_manual() {
+    echo "手动下载rclone for Alpine Linux..."
+    
+    # 检测架构
+    local ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) RCLONE_ARCH="amd64" ;;
+        aarch64|arm64) RCLONE_ARCH="arm64" ;;
+        armv7l) RCLONE_ARCH="arm-v7" ;;
+        *) RCLONE_ARCH="amd64" ;;
+    esac
+    
+    # 获取最新版本号
+    local LATEST_VERSION=$(curl -s https://downloads.rclone.org/version.txt | cut -d'v' -f2)
+    if [ -z "$LATEST_VERSION" ]; then
+        LATEST_VERSION="1.66.0"  # 备用版本
+    fi
+    
+    local RCLONE_URL="https://downloads.rclone.org/v${LATEST_VERSION}/rclone-v${LATEST_VERSION}-linux-${RCLONE_ARCH}.zip"
+    
+    echo "下载rclone v${LATEST_VERSION} for ${RCLONE_ARCH}..."
+    
+    # 下载
+    if ! curl -L -o /tmp/rclone.zip "$RCLONE_URL"; then
+        echo "错误: 下载失败"
+        return 1
+    fi
+    
+    # 解压
+    if ! unzip -q /tmp/rclone.zip -d /tmp/; then
+        echo "错误: 解压失败"
+        return 1
+    fi
+    
+    # 查找解压目录
+    local RCLONE_DIR=$(find /tmp -name "rclone-v${LATEST_VERSION}-linux-${RCLONE_ARCH}" -type d 2>/dev/null | head -1)
+    if [ -z "$RCLONE_DIR" ]; then
+        # 尝试其他命名模式
+        RCLONE_DIR=$(find /tmp -name "rclone-*-linux-${RCLONE_ARCH}" -type d 2>/dev/null | head -1)
+    fi
+    
+    if [ -z "$RCLONE_DIR" ] || [ ! -f "$RCLONE_DIR/rclone" ]; then
+        echo "错误: 找不到rclone可执行文件"
+        return 1
+    fi
+    
+    # 安装到系统
+    cp "$RCLONE_DIR/rclone" /usr/local/bin/
+    chmod +x /usr/local/bin/rclone
+    mkdir -p /usr/local/share/man/man1
+    cp "$RCLONE_DIR/rclone.1" /usr/local/share/man/man1/ 2>/dev/null || true
+    
+    # 清理
+    rm -f /tmp/rclone.zip
+    rm -rf "$RCLONE_DIR"
+    
+    echo "✓ 手动安装成功"
+    return 0
+}
+
 # 安装rclone
 install_rclone() {
     echo "正在安装rclone..."
     
     # 检查是否已安装rclone
     if command -v rclone >/dev/null 2>&1; then
-        echo "rclone已安装，版本: $(rclone version | head -1)"
-        return
+        local version=$(rclone version | head -1)
+        echo "rclone已安装，版本: $version"
+        return 0
     fi
     
-    # 根据系统类型选择安装方法
-    if [ "$PKG_MANAGER" = "apk" ]; then
-        # Alpine Linux的特定处理
-        if [ -f /etc/alpine-release ]; then
-            # 检查musl版本
-            MUSL_ARCH=$(uname -m)
-            case $MUSL_ARCH in
-                "x86_64")
-                    RCLONE_ARCH="amd64"
-                    ;;
-                "aarch64"|"arm64")
-                    RCLONE_ARCH="arm64"
-                    ;;
-                "armv7l")
-                    RCLONE_ARCH="arm-v7"
-                    ;;
-                *)
-                    RCLONE_ARCH="amd64"  # 默认值
-                    ;;
-            esac
-            
-            echo "下载rclone for Alpine Linux (musl)..."
-            RCLONE_URL="https://downloads.rclone.org/rclone-current-linux-${RCLONE_ARCH}.zip"
-            curl -o /tmp/rclone.zip -L "$RCLONE_URL"
-            unzip -q /tmp/rclone.zip -d /tmp/
-            RCLONE_DIR=$(find /tmp -name "rclone-*-linux-${RCLONE_ARCH}" -type d | head -1)
-            if [ -n "$RCLONE_DIR" ]; then
-                sudo cp "$RCLONE_DIR/rclone" /usr/local/bin/
-                sudo chmod +x /usr/local/bin/rclone
-                sudo mkdir -p /usr/local/share/man/man1
-                sudo cp "$RCLONE_DIR/rclone.1" /usr/local/share/man/man1/
-                rm -rf /tmp/rclone* "$RCLONE_DIR"
-            else
-                echo "错误: 无法找到解压的rclone文件"
-                exit 1
-            fi
-        else
-            # 非Alpine的musl系统
-            curl https://rclone.org/install.sh | sudo bash
+    # Alpine Linux特殊处理
+    if [ "$OS" = "alpine" ]; then
+        echo "检测到Alpine Linux，使用专用安装流程..."
+        
+        # 方法1: 尝试官方仓库
+        install_rclone_alpine_official && return 0
+        
+        # 方法2: 尝试edge仓库
+        install_rclone_alpine_edge && return 0
+        
+        # 方法3: 手动下载安装
+        install_rclone_alpine_manual && return 0
+        
+        # 方法4: 使用官方安装脚本（最后尝试）
+        echo "尝试使用官方安装脚本..."
+        if curl -fsSL https://rclone.org/install.sh | bash; then
+            echo "✓ 官方脚本安装成功"
+            return 0
         fi
     else
-        # 使用官方安装脚本（适用于glibc系统）
-        curl -fsSL https://rclone.org/install.sh | sudo bash
+        # 其他系统使用官方安装脚本
+        echo "使用官方安装脚本..."
+        if curl -fsSL https://rclone.org/install.sh | sudo bash; then
+            echo "✓ 官方脚本安装成功"
+            return 0
+        fi
     fi
     
-    if ! command -v rclone >/dev/null 2>&1; then
-        echo "错误: rclone安装失败"
-        exit 1
-    fi
-    
-    echo "rclone安装完成，版本: $(rclone version | head -1)"
+    echo "错误: 所有安装方法都失败了"
+    return 1
 }
 
 # 创建配置
@@ -205,28 +290,45 @@ verify_installation() {
     echo "显示配置信息:"
     rclone config show penggan
     
-    # 测试连接（可选，可能需要网络）
+    # 测试连接
     echo -e "\n测试B2连接..."
     if rclone lsd penggan: >/dev/null 2>&1; then
         echo "✓ B2连接成功"
+        
+        # 列出存储桶
+        echo -e "\n可用的存储桶:"
+        rclone lsd penggan:
     else
         echo "⚠  B2连接测试失败，请检查密钥和网络连接"
         echo "配置已保存，您可以稍后运行: rclone lsd penggan:"
     fi
 }
 
+# 显示使用说明
+show_usage() {
+    echo -e "\n安装完成！"
+    echo "使用方法:"
+    echo "  列出存储桶: rclone lsd penggan:"
+    echo "  列出文件: rclone ls penggan:bucket-name"
+    echo "  复制文件: rclone copy source.txt penggan:bucket-name/"
+    echo "  下载文件: rclone copy penggan:bucket-name/file.txt ./"
+    echo -e "\n测试下载命令:"
+    echo "  mkdir -p /opt && rclone cat penggan:penggan/opt/komari.tar.gz | tar -xzf - -C /opt --strip-components=1"
+}
+
 # 主函数
 main() {
     echo "开始安装 B2 配置脚本..."
-    
-    # 检测系统
-    detect_system
+    echo "系统检测: $OS $OS_VERSION"
     
     # 安装依赖
     install_dependencies
     
     # 安装rclone
-    install_rclone
+    if ! install_rclone; then
+        echo "错误: rclone安装失败"
+        exit 1
+    fi
     
     # 创建配置
     create_config
@@ -234,11 +336,10 @@ main() {
     # 验证安装
     verify_installation
     
-    echo -e "\n安装完成！"
-    echo "使用方法:"
-    echo "  列出存储桶: rclone lsd penggan:"
-    echo "  列出文件: rclone ls penggan:bucket-name"
-    echo "  复制文件: rclone copy source.txt penggan:bucket-name/"
+    # 显示使用说明
+    show_usage
+    
+    echo -e "\n✓ 安装完成！"
 }
 
 # 执行主函数
