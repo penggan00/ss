@@ -134,7 +134,7 @@ create_openrc_service() {
 name="komari"
 description="Komari Monitor Service"
 command="${BINARY_PATH}"
-command_args="server -l 0.0.0.0:${port}"
+command_args="server -l 0.0.0.0:${port} -l [::]:${port}"
 command_background=true
 pidfile="/run/\${RC_SVCNAME}.pid"
 directory="${DATA_DIR}"
