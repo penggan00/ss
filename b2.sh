@@ -239,7 +239,7 @@ install_rclone() {
     else
         # 其他系统使用官方安装脚本
         echo "使用官方安装脚本..."
-        if curl -fsSL https://rclone.org/install.sh | sudo bash; then
+        if curl -fsSL https://rclone.org/install.sh | bash; then
             echo "✓ 官方脚本安装成功"
             return 0
         fi
