@@ -6,7 +6,7 @@ mkdir $base 2>/dev/null
 conf=$base/conf
 touch $conf
 
-# wget wget --no-check-certificate -qO natcfg.sh https://raw.githubusercontent.com/penggan00/ss/main/argosbx.sh && bash natcfg.sh
+# wget wget --no-check-certificate -qO natcfg.sh http://blog.arloor.com/sh/iptablesUtils/natcfg.sh && bash natcfg.sh
 
     clear
     echo "#############################################################"
@@ -38,7 +38,7 @@ echo "正在安装依赖...."
 # 检测系统类型并安装依赖
 if [ -f /etc/alpine-release ]; then
     # Alpine Linux
-    apk add -q bind-tools iptables 2>/dev/null
+    apk add -q bind-tools iptables iptables-openrc 2>/dev/null
     echo "Alpine Linux: 安装bind-tools和iptables"
 elif command -v yum >/dev/null 2>&1; then
     # CentOS/RHEL/Fedora
@@ -51,11 +51,11 @@ elif command -v apt-get >/dev/null 2>&1; then
     echo "Debian/Ubuntu: 安装dnsutils和iptables"
 elif command -v apk >/dev/null 2>&1; then
     # Alpine Linux (备选检查)
-    apk add -q bind-tools iptables 2>/dev/null
+    apk add -q bind-tools iptables iptables-openrc 2>/dev/null
     echo "Alpine Linux: 安装bind-tools和iptables"
 else
     echo "无法识别系统类型，请手动安装依赖："
-    echo "对于Alpine: apk add bind-tools iptables"
+    echo "对于Alpine: apk add bind-tools iptables iptables-openrc"
     echo "对于CentOS: yum install bind-utils iptables iptables-services"
     echo "对于Debian: apt-get install dnsutils iptables"
     exit 1
@@ -84,6 +84,15 @@ turnOnNat(){
     
     # 立即生效
     echo 1 > /proc/sys/net/ipv4/ip_forward
+
+    # 检查并开启iptables
+    if [ -f /etc/alpine-release ]; then
+        # Alpine Linux: 确保iptables服务运行
+        if [ -f /etc/init.d/iptables ]; then
+            /etc/init.d/iptables start 2>/dev/null || true
+            rc-update add iptables boot 2>/dev/null || true
+        fi
+    fi
 
     #开放FORWARD链
     echo "2. 开放iptbales中的FORWARD链  【成功】"
@@ -201,29 +210,7 @@ done
 AAAA
 echo 
 
-
-# 创建systemd服务
-cat > /lib/systemd/system/dnat.service <<EOF
-[Unit]
-Description=动态设置iptables转发规则
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/root/
-ExecStart=/bin/bash /usr/local/bin/dnat.sh
-Restart=always
-RestartSec=30
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=dnat
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Alpine Linux使用openrc，需要额外处理
+# 创建服务管理
 if [ -f /etc/alpine-release ]; then
     echo "检测到Alpine Linux系统，创建OpenRC服务..."
     
@@ -265,30 +252,76 @@ EOF
     echo "  rc-service dnat restart  # 重启服务"
     echo "  rc-update add dnat       # 添加到开机启动"
     
-    # 同时保留systemd服务，以防有些Alpine使用systemd
-    echo "也创建了systemd服务（如果使用systemd）"
 else
-    echo "非Alpine系统，使用systemd服务管理"
+    # 非Alpine系统，创建systemd服务
+    echo "检测到非Alpine系统，创建systemd服务..."
+    
+    # 确保目录存在
+    mkdir -p /lib/systemd/system /etc/systemd/system
+    
+    cat > /lib/systemd/system/dnat.service <<'EOF'
+[Unit]
+Description=动态设置iptables转发规则
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/
+ExecStart=/bin/bash /usr/local/bin/dnat.sh
+Restart=always
+RestartSec=30
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=dnat
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable dnat 2>/dev/null || true
+    service dnat stop 2>/dev/null || true
+    service dnat start 2>/dev/null || true
 fi
 
-systemctl daemon-reload 2>/dev/null || true
-systemctl enable dnat 2>/dev/null || true
-service dnat stop 2>/dev/null || true
-service dnat start 2>/dev/null || true
-
-# Alpine特定提示
+# 启动服务
 if [ -f /etc/alpine-release ]; then
+    # Alpine: 启动并添加到开机启动
+    rc-service dnat stop 2>/dev/null || true
+    rc-service dnat start 2>/dev/null || true
+    rc-update add dnat 2>/dev/null || true
+    
+    # 确保iptables服务也启动
+    if [ -f /etc/init.d/iptables ]; then
+        rc-update add iptables boot 2>/dev/null || true
+        rc-service iptables start 2>/dev/null || true
+    fi
+    
     echo ""
     echo "================================================"
-    echo "Alpine Linux 使用提示："
-    echo "1. 确保iptables已安装：apk add iptables"
-    echo "2. 确保iptables在启动时加载："
-    echo "   rc-update add iptables"
-    echo "   rc-service iptables start"
-    echo "3. 如果需要开机启动dnat："
-    echo "   rc-update add dnat"
-    echo "4. 启动dnat服务："
-    echo "   rc-service dnat start"
+    echo "Alpine Linux 配置完成！"
+    echo "服务状态："
+    rc-service dnat status 2>/dev/null || echo "  dnat服务状态检查失败，请手动检查"
+    echo ""
+    echo "常用命令："
+    echo "  rc-service dnat status    # 查看服务状态"
+    echo "  rc-service dnat restart   # 重启服务"
+    echo "  rc-service dnat stop      # 停止服务"
+    echo "  logs dnat                 # 查看服务日志"
+    echo ""
+    echo "当前转发规则："
+    cat $conf 2>/dev/null | while read line; do echo "  $line"; done
+    echo "================================================"
+else
+    echo ""
+    echo "================================================"
+    echo "服务配置完成！"
+    echo "服务状态："
+    systemctl status dnat --no-pager 2>/dev/null || service dnat status 2>/dev/null || echo "  请手动检查服务状态"
+    echo ""
+    echo "当前转发规则："
+    cat $conf 2>/dev/null | while read line; do echo "  $line"; done
     echo "================================================"
 fi
 }
