@@ -1,20 +1,19 @@
 #!/bin/sh
 ###############################################################################
 #
-# OpenList Manage Script for Alpine Linux (Local Package Version)
+# OpenList Manage Script for Alpine Linux
 #
-# Version: 1.3.3-alpine-local
+# Version: 1.3.3-alpine
 # Last Updated: 2025-09-29
 #
 # Description:
 #   A management script for OpenList (https://github.com/OpenListTeam/OpenList)
 #   Specifically adapted for Alpine Linux with OpenRC
-#   Uses local tar.gz package instead of downloading
 #
 # Requirements:
 #   - Alpine Linux
 #   - Root privileges for installation
-#   - Local package: openlist-alpine-standard-install.tar.gz (in root directory)
+#   - curl, tar
 #
 # Author: ILoveScratch and OpenList Dev Team
 #
@@ -30,6 +29,20 @@ BLUE_COLOR='\033[1;34m'
 CYAN_COLOR='\033[1;36m'
 PURPLE_COLOR='\033[1;35m'
 RES='\033[0m'
+
+# CPU架构定义
+ARCH_MAP_x86_64="amd64"
+ARCH_MAP_aarch64="arm64"
+ARCH_MAP_loongarch64="loong64"
+ARCH_MAP_loongson3="mips64le"
+ARCH_MAP_s390x="s390x"
+
+# 检查系统是否为Linux
+CURRENT_OS=$(uname -s)
+if [ "$CURRENT_OS" != "Linux" ]; then
+    echo -e "${RED_COLOR}错误：此脚本仅支持 Linux 系统${RES}"
+    exit 1
+fi
 
 # 使用 doas 或 sudo 确保 root 执行
 check_root() {
@@ -94,47 +107,57 @@ check_disk_space() {
     fi
 }
 
-# 检查本地tar包是否存在
-check_local_package() {
-    # 在根目录查找tar包
-    local package_name="openlist-alpine-standard-install.tar.gz"
-    local possible_locations="/root/$package_name" "~/$package_name" "/$package_name" "./$package_name"
-    
-    for location in $possible_locations; do
-        if [ -f "$location" ]; then
-            LOCAL_PACKAGE="$location"
-            echo -e "${GREEN_COLOR}找到本地包: $LOCAL_PACKAGE${RES}"
-            return 0
-        fi
-    done
-    
-    # 如果没有找到标准名称，查找类似的文件
-    local found_package=$(find / -name "*openlist*alpine*.tar.gz" -type f 2>/dev/null | head -1)
-    if [ -n "$found_package" ]; then
-        LOCAL_PACKAGE="$found_package"
-        echo -e "${GREEN_COLOR}找到类似包: $LOCAL_PACKAGE${RES}"
-        return 0
-    fi
-    
-    echo -e "${RED_COLOR}错误：未找到本地OpenList包${RES}"
-    echo -e "${YELLOW_COLOR}请确保以下文件存在：${RES}"
-    echo "  - openlist-alpine-standard-install.tar.gz (在根目录)"
-    echo "  - 或任何包含 'openlist' 和 'alpine' 的tar.gz文件"
-    echo -e "\n${YELLOW_COLOR}你可以手动指定包路径：${RES}"
-    echo "用法: $0 install /path/to/package.tar.gz [安装路径]"
+# 检查必要的命令
+if ! command -v curl >/dev/null 2>&1; then
+    echo -e "${RED_COLOR}错误：未找到 curl 命令，请先安装${RES}"
+    echo -e "${YELLOW_COLOR}运行: apk add curl${RES}"
     exit 1
-}
+fi
 
 # 配置部分
 GITHUB_REPO="OpenListTeam/OpenList"
 VERSION_TAG="beta"
 VERSION_FILE="/opt/openlist/.version"
-LOCAL_PACKAGE=""
+GH_DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/latest/download"
 
 # Docker 配置
 DOCKER_IMAGE_TAG="beta"
 DOCKER_CONTAINER_NAME="openlist"
 DOCKER_PORT="5244"
+
+# 获取平台架构
+if command -v arch >/dev/null 2>&1; then
+    platform=$(arch)
+else
+    platform=$(uname -m)
+fi
+
+case "$platform" in
+    x86_64)
+        ARCH="amd64"
+        ;;
+    aarch64)
+        ARCH="arm64"
+        ;;
+    loongarch64)
+        ARCH="loong64"
+        ;;
+    loongson3)
+        ARCH="mips64le"
+        ;;
+    s390x)
+        ARCH="s390x"
+        ;;
+    *)
+        ARCH="UNKNOWN"
+        ;;
+esac
+
+# 环境检查
+if [ "$ARCH" = "UNKNOWN" ]; then
+    echo -e "\r\n${RED_COLOR}出错了${RES}，一键安装目前暂不支持 $platform 平台。\r\n"
+    exit 1
+fi
 
 # 检查 Alpine 是否使用 OpenRC
 if ! command -v rc-update >/dev/null 2>&1; then
@@ -180,7 +203,7 @@ CHECK() {
 
     # 检查是否已安装
     if [ -f "$INSTALL_PATH/openlist" ]; then
-        echo -e "${YELLOW_COLOR}此位置已经安装，请选择其他位置，或使用更新命令${RES}"
+        echo "此位置已经安装，请选择其他位置，或使用更新命令"
         exit 0
     fi
 
@@ -201,60 +224,72 @@ CHECK() {
 ADMIN_USER=""
 ADMIN_PASS=""
 
+# 下载文件
+download_file() {
+    local url="$1"
+    local output="$2"
+    local max_retries=3
+    local retry_count=0
+    local wait_time=2
+
+    while [ $retry_count -lt $max_retries ]; do
+        if curl -L --connect-timeout 10 --retry 3 --retry-delay 3 "$url" -o "$output"; then
+            if [ -f "$output" ] && [ -s "$output" ]; then
+                return 0
+            fi
+        fi
+        
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -lt $max_retries ]; then
+            echo -e "${YELLOW_COLOR}下载失败，${wait_time} 秒后进行第 $retry_count 次重试...${RES}"
+            sleep $wait_time
+            wait_time=$((wait_time + 2))
+        else
+            echo -e "${RED_COLOR}下载失败，已重试 $max_retries 次${RES}"
+            return 1
+        fi
+    done
+    return 1
+}
+
 # 安装 OpenList
 INSTALL() {
     CURRENT_DIR=$(pwd)
     
-    # 检查本地包
-    if [ -z "$LOCAL_PACKAGE" ]; then
-        check_local_package
+    # 询问是否使用代理
+    echo -e "${GREEN_COLOR}是否使用 GitHub 代理？（默认无代理）${RES}"
+    echo -e "${GREEN_COLOR}代理地址必须为 https 开头，斜杠 / 结尾 ${RES}"
+    echo -e "${GREEN_COLOR}例如：https://ghproxy.net/ ${RES}"
+    printf "请输入代理地址或直接按 Enter 继续: "
+    read proxy_input
+
+    if [ -n "$proxy_input" ]; then
+        GH_PROXY="$proxy_input"
+        GH_DOWNLOAD_URL="${GH_PROXY}https://github.com/OpenListTeam/OpenList/releases/latest/download"
+        echo -e "${GREEN_COLOR}已使用代理地址: $GH_PROXY${RES}"
+    else
+        GH_DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/latest/download"
+        echo -e "${GREEN_COLOR}使用默认 GitHub 地址进行下载${RES}"
     fi
+
+    echo -e "\r\n${GREEN_COLOR}下载 OpenList ...${RES}"
     
-    echo -e "\r\n${GREEN_COLOR}使用本地包安装 OpenList ...${RES}"
-    echo -e "${GREEN_COLOR}包路径: $LOCAL_PACKAGE${RES}"
-    
-    # 检查包文件
-    if [ ! -f "$LOCAL_PACKAGE" ]; then
-        echo -e "${RED_COLOR}错误：包文件不存在: $LOCAL_PACKAGE${RES}"
+    if ! download_file "${GH_DOWNLOAD_URL}/openlist-linux-musl-$ARCH.tar.gz" "/tmp/openlist.tar.gz"; then
+        echo -e "${RED_COLOR}下载失败！${RES}"
         exit 1
     fi
-    
-    # 提取包内容
-    echo -e "${GREEN_COLOR}解压包文件...${RES}"
-    
-    # 创建临时目录
-    TEMP_DIR=$(mktemp -d)
-    if [ ! -d "$TEMP_DIR" ]; then
-        echo -e "${RED_COLOR}错误：无法创建临时目录${RES}"
-        exit 1
-    fi
-    
-    # 解压tar包
-    if ! tar zxf "$LOCAL_PACKAGE" -C "$TEMP_DIR"; then
+
+    if ! tar zxf /tmp/openlist.tar.gz -C "$INSTALL_PATH/"; then
         echo -e "${RED_COLOR}解压失败！${RES}"
-        rm -rf "$TEMP_DIR"
+        rm -f /tmp/openlist.tar.gz
         exit 1
     fi
-    
-    # 查找二进制文件
-    BINARY_FILE=""
-    # 首先查找openlist文件
-    BINARY_FILE=$(find "$TEMP_DIR" -name "openlist" -type f | head -1)
-    
-    # 如果没有找到，查找任何可执行文件
-    if [ -z "$BINARY_FILE" ]; then
-        BINARY_FILE=$(find "$TEMP_DIR" -type f -executable | head -1)
-    fi
-    
-    if [ -n "$BINARY_FILE" ] && [ -f "$BINARY_FILE" ]; then
-        echo -e "${GREEN_COLOR}找到二进制文件: $BINARY_FILE${RES}"
-        
-        # 复制到安装目录
-        cp "$BINARY_FILE" "$INSTALL_PATH/openlist"
+
+    if [ -f "$INSTALL_PATH/openlist" ]; then
+        echo -e "${GREEN_COLOR}下载成功，正在安装...${RES}"
+
         chmod +x "$INSTALL_PATH/openlist"
-        
-        echo -e "${GREEN_COLOR}安装成功！${RES}"
-        
+
         # 获取初始账号密码
         cd "$INSTALL_PATH"
         ACCOUNT_INFO=$("$INSTALL_PATH/openlist" admin random 2>&1)
@@ -262,26 +297,19 @@ INSTALL() {
         ADMIN_PASS=$(echo "$ACCOUNT_INFO" | grep "password:" | sed 's/.*password://' | tr -d ' ')
         cd "$CURRENT_DIR"
     else
-        echo -e "${RED_COLOR}错误：在包中未找到可执行文件${RES}"
-        
-        # 显示包内容
-        echo -e "${YELLOW_COLOR}包内容：${RES}"
-        tar -tzf "$LOCAL_PACKAGE" || true
-        
-        rm -rf "$TEMP_DIR"
+        echo -e "${RED_COLOR}安装失败！${RES}"
+        rm -rf "$INSTALL_PATH"
+        mkdir -p "$INSTALL_PATH"
         exit 1
     fi
-    
-    # 清理临时目录
-    rm -rf "$TEMP_DIR"
-    
+
     # 记录版本信息
     VERSION_INFO=$("$INSTALL_PATH/openlist" version 2>&1)
     REAL_VERSION=$(echo "$VERSION_INFO" | grep "^Version:" | sed 's/Version://' | tr -d ' ' | grep . || echo "$VERSION_TAG")
     echo "$REAL_VERSION" > "$VERSION_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S')" >> "$VERSION_FILE"
-    
-    echo -e "${GREEN_COLOR}本地包安装完成${RES}"
+
+    rm -f /tmp/openlist*
 }
 
 # 初始化 OpenRC 服务
@@ -318,8 +346,6 @@ EOF
 
     chmod +x /etc/init.d/openlist
     rc-update add openlist default
-    
-    echo -e "${GREEN_COLOR}OpenRC服务初始化完成${RES}"
 }
 
 # 安装成功提示
@@ -378,17 +404,46 @@ UPDATE() {
 
     echo -e "${GREEN_COLOR}开始更新 OpenList ...${RES}"
 
-    # 检查本地包
-    if [ -z "$LOCAL_PACKAGE" ]; then
-        check_local_package
+    # 询问是否使用代理
+    if [ -t 0 ]; then
+        echo -e "${GREEN_COLOR}是否使用 GitHub 代理？（默认无代理）${RES}"
+        echo -e "${GREEN_COLOR}例如：https://ghproxy.com/ ${RES}"
+        printf "请输入代理地址或直接按 Enter 继续: "
+        read proxy_input
+
+        if [ -n "$proxy_input" ]; then
+            GH_PROXY="$proxy_input"
+            GH_DOWNLOAD_URL="${GH_PROXY}https://github.com/OpenListTeam/OpenList/releases/download"
+        else
+            GH_PROXY=""
+            GH_DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download"
+        fi
+    else
+        if [ -n "$GH_PROXY" ]; then
+            GH_DOWNLOAD_URL="${GH_PROXY}https://github.com/OpenListTeam/OpenList/releases/download"
+        else
+            GH_DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/download"
+        fi
     fi
-    
-    echo -e "${GREEN_COLOR}使用本地包更新: $LOCAL_PACKAGE${RES}"
-    
-    # 检查包文件
-    if [ ! -f "$LOCAL_PACKAGE" ]; then
-        echo -e "${RED_COLOR}错误：包文件不存在: $LOCAL_PACKAGE${RES}"
-        exit 1
+
+    # 获取版本信息
+    echo -e "${GREEN_COLOR}获取版本信息...${RES}"
+    REAL_VERSION=$(curl -s "https://api.github.com/repos/OpenListTeam/OpenList/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' 2>/dev/null | grep . || echo "$VERSION_TAG")
+
+    if [ "$REAL_VERSION" = "beta" ]; then
+        echo -e "${YELLOW_COLOR}提示：获取最新版本信息失败，默认升级到latest版本！${RES}"
+        GH_DOWNLOAD_URL="${GH_PROXY}https://github.com/OpenListTeam/OpenList/releases/latest/download"
+    else
+        CURRENT_VERSION=""
+        if [ -f "$VERSION_FILE" ]; then
+            CURRENT_VERSION=$(head -n1 "$VERSION_FILE" 2>/dev/null)
+        fi
+
+        if [ -n "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" = "$REAL_VERSION" ]; then
+            echo -e "${GREEN_COLOR}当前已是最新版本 ($CURRENT_VERSION)，无需更新${RES}"
+            return 0
+        fi
+        GH_DOWNLOAD_URL="${GH_DOWNLOAD_URL}/${REAL_VERSION}"
     fi
 
     echo -e "${GREEN_COLOR}停止 OpenList 进程${RES}\r\n"
@@ -396,58 +451,42 @@ UPDATE() {
 
     cp "$INSTALL_PATH/openlist" /tmp/openlist.bak
 
-    echo -e "${GREEN_COLOR}解压更新包...${RES}"
-    
-    # 创建临时目录
-    TEMP_DIR=$(mktemp -d)
-    if [ ! -d "$TEMP_DIR" ]; then
-        echo -e "${RED_COLOR}错误：无法创建临时目录${RES}"
+    echo -e "${GREEN_COLOR}下载 OpenList ...${RES}"
+    if ! download_file "${GH_DOWNLOAD_URL}/openlist-linux-musl-$ARCH.tar.gz" "/tmp/openlist.tar.gz"; then
+        echo -e "${RED_COLOR}下载失败，更新终止${RES}"
+        echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
+        mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
         rc-service openlist start
         exit 1
     fi
-    
-    # 解压tar包
-    if ! tar zxf "$LOCAL_PACKAGE" -C "$TEMP_DIR"; then
+
+    if ! tar zxf /tmp/openlist.tar.gz -C "$INSTALL_PATH/"; then
         echo -e "${RED_COLOR}解压失败，更新终止${RES}"
         echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
         mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
         rc-service openlist start
-        rm -rf "$TEMP_DIR"
+        rm -f /tmp/openlist.tar.gz
         exit 1
     fi
-    
-    # 查找二进制文件
-    BINARY_FILE=$(find "$TEMP_DIR" -name "openlist" -type f | head -1)
-    if [ -z "$BINARY_FILE" ]; then
-        BINARY_FILE=$(find "$TEMP_DIR" -type f -executable | head -1)
-    fi
-    
-    if [ -n "$BINARY_FILE" ] && [ -f "$BINARY_FILE" ]; then
-        echo -e "${GREEN_COLOR}找到更新文件: $BINARY_FILE${RES}"
-        
-        # 复制到安装目录
-        cp "$BINARY_FILE" "$INSTALL_PATH/openlist"
+
+    if [ -f "$INSTALL_PATH/openlist" ]; then
+        echo -e "${GREEN_COLOR}下载成功，正在更新${RES}"
         chmod +x "$INSTALL_PATH/openlist"
-        
-        echo -e "${GREEN_COLOR}更新成功${RES}"
     else
-        echo -e "${RED_COLOR}错误：在包中未找到可执行文件，更新终止${RES}"
+        echo -e "${RED_COLOR}更新失败！${RES}"
         echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
         mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
         rc-service openlist start
-        rm -rf "$TEMP_DIR"
+        rm -f /tmp/openlist.tar.gz
         exit 1
     fi
-    
-    # 清理临时目录
-    rm -rf "$TEMP_DIR"
 
     VERSION_INFO=$("$INSTALL_PATH/openlist" version 2>&1)
     REAL_VERSION=$(echo "$VERSION_INFO" | grep "^Version:" | sed 's/Version://' | tr -d ' ' | grep . || echo "$REAL_VERSION")
     echo "$REAL_VERSION" > "$VERSION_FILE"
     echo "$(date '+%Y-%m-%d %H:%M:%S')" >> "$VERSION_FILE"
 
-    rm -f /tmp/openlist.bak
+    rm -f /tmp/openlist.tar.gz /tmp/openlist.bak
 
     echo -e "${GREEN_COLOR}启动 OpenList 进程${RES}\r\n"
     rc-service openlist restart
@@ -523,10 +562,10 @@ UNINSTALL() {
 
 # 显示菜单
 SHOW_MENU() {
-    echo -e "\n欢迎使用 OpenList 管理脚本 (Alpine 本地包版)\n"
+    echo -e "\n欢迎使用 OpenList 管理脚本 (Alpine)\n"
     echo -e "${GREEN_COLOR}基础功能：${RES}"
-    echo -e "${GREEN_COLOR}1、安装 OpenList (使用本地包)${RES}"
-    echo -e "${GREEN_COLOR}2、更新 OpenList (使用本地包)${RES}"
+    echo -e "${GREEN_COLOR}1、安装 OpenList${RES}"
+    echo -e "${GREEN_COLOR}2、更新 OpenList${RES}"
     echo -e "${GREEN_COLOR}3、卸载 OpenList${RES}"
     echo -e "${GREEN_COLOR}-------------------${RES}"
     echo -e "${GREEN_COLOR}服务管理：${RES}"
@@ -619,38 +658,16 @@ if [ $# -eq 0 ]; then
         clear
     done
 elif [ "$1" = "install" ]; then
-    # 如果指定了包路径
-    if [ -n "$2" ] && [ -f "$2" ]; then
-        LOCAL_PACKAGE="$2"
-        # 如果有第三个参数，作为安装路径
-        if [ -n "$3" ]; then
-            INSTALL_PATH="$3"
-            if ! echo "$INSTALL_PATH" | grep -q "/openlist$"; then
-                INSTALL_PATH="$INSTALL_PATH/openlist"
-            fi
-        else
-            INSTALL_PATH=$(get_install_path)
-        fi
-    else
-        # 否则使用默认包
-        INSTALL_PATH=$(get_install_path)
-        if [ -n "$2" ]; then
-            INSTALL_PATH="$2"
-            if ! echo "$INSTALL_PATH" | grep -q "/openlist$"; then
-                INSTALL_PATH="$INSTALL_PATH/openlist"
-            fi
-        fi
-    fi
-    
     check_disk_space
     CHECK
     INSTALL
     INIT
     SUCCESS
 elif [ "$1" = "update" ]; then
-    # 如果指定了包路径
-    if [ -n "$2" ] && [ -f "$2" ]; then
-        LOCAL_PACKAGE="$2"
+    if [ $# -gt 1 ]; then
+        echo -e "${RED_COLOR}错误：update 命令不需要指定路径${RES}"
+        echo -e "正确用法: $0 update"
+        exit 1
     fi
     check_disk_space
     UPDATE
@@ -663,10 +680,8 @@ elif [ "$1" = "uninstall" ]; then
     UNINSTALL
 else
     echo -e "${RED_COLOR}错误的命令${RES}"
-    echo -e "用法: $0 install [包路径] [安装路径]    # 安装 OpenList (使用本地包)"
-    echo -e "     $0 update [包路径]              # 更新 OpenList (使用本地包)"
-    echo -e "     $0 uninstall                   # 卸载 OpenList"
-    echo -e "     $0                             # 显示交互菜单"
-    echo -e "\n${YELLOW_COLOR}本地包默认查找: openlist-alpine-standard-install.tar.gz${RES}"
-    echo -e "${YELLOW_COLOR}通常位置: /root/ 或 当前目录${RES}"
+    echo -e "用法: $0 install [安装路径]    # 安装 OpenList"
+    echo -e "     $0 update              # 更新 OpenList"
+    echo -e "     $0 uninstall          # 卸载 OpenList"
+    echo -e "     $0                    # 显示交互菜单"
 fi
