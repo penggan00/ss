@@ -20,7 +20,7 @@ echo "添加允许的端口规则..."
 TCP_ONLY_PORTS="222 80 443"
 
 # 同时需要 TCP 和 UDP 的端口
-BOTH_PORTS="51200 51201 51202 51203 51300"
+BOTH_PORTS="51200 51201 51202 51203"
 # 配置仅 TCP 端口
 for port in $TCP_ONLY_PORTS; do
     sudo ufw allow $port/tcp comment "TCP port $port"
