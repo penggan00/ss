@@ -333,14 +333,6 @@ test_connectivity() {
         echo -e "${YELLOW}      ⚠ ping6 不可用，跳过 IPv6 连通性测试${NC}"
     fi
     
-    # 测试中转端口本地访问
-    echo -e "${BLUE}   测试中转端口本地访问 (127.0.0.1:$TRANSIT_PORT)...${NC}"
-    if timeout 3 nc -z 127.0.0.1 $TRANSIT_PORT 2>/dev/null; then
-        echo -e "${GREEN}      ✓ 本地中转端口可访问${NC}"
-    else
-        echo -e "${YELLOW}      ⚠ 本地中转端口无响应（可能正常，需外部测试）${NC}"
-    fi
-    
     # 测试 DNAT 规则
     echo -e "${BLUE}   验证 DNAT 规则...${NC}"
     if iptables -t nat -L PREROUTING -n | grep -q "dpt:$TRANSIT_PORT"; then
