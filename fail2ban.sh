@@ -1,6 +1,7 @@
 #!/bin/sh
 echo "=== 跨平台 fail2ban 安装配置脚本 ==="
-
+echo "alias docker-compose='docker compose'" >> ~/.bashrc && source ~/.bashrc
+sysctl vm.swappiness=10 && echo "vm.swappiness=10" | tee /etc/sysctl.d/99-swappiness.conf
 # 检测系统类型
 if [ -f /etc/alpine-release ]; then
     SYSTEM="alpine"
