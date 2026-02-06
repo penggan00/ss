@@ -34,23 +34,6 @@ apt update -y
 apt upgrade -y
 apt install -y curl wget git htop tmux nano tree jq fail2ban ufw 
 
-# 配置fail2ban
-echo "配置fail2ban..."
-systemctl stop fail2ban >/dev/null 2>&1
-tee /etc/fail2ban/jail.local > /dev/null << 'EOF'
-[DEFAULT]
-ignoreip = 127.0.0.1/8 ::1
-
-[sshd]
-enabled = true
-backend = systemd
-maxretry = 3
-EOF
-systemctl start fail2ban >/dev/null 2>&1
-
-# 安装docker docker-compose
-curl -fsSL https://get.docker.com | sh && systemctl enable docker && systemctl start docker && curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && chmod +x /usr/local/bin/docker-compose && echo "安装完成" && docker --version && docker-compose --version
-
 # 完整的时区设置
 apt-get update && apt-get install -y systemd-timesyncd
 timedatectl set-timezone Asia/Singapore && \
@@ -58,29 +41,6 @@ timedatectl set-local-rtc 0 && \
 timedatectl set-ntp true && \
 echo "✅ 时区设置完成" && \
 timedatectl status
-
-# 配置SSH保活
-echo "配置SSH保活..."
-cat > ~/.ssh/config << 'EOF'
-Host *
-  ServerAliveInterval 60
-  ServerAliveCountMax 3
-  TCPKeepAlive yes
-  ControlMaster auto
-  ControlPath ~/.ssh/control/%r@%h:%p
-  ControlPersist 168h
-  Compression yes
-  CompressionLevel 6
-  IPQoS throughput
-  ConnectTimeout 30
-  ConnectionAttempts 3
-  StrictHostKeyChecking no
-EOF
-
-mkdir -p ~/.ssh/control
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/config
-chmod 700 ~/.ssh/control
 
 # 设置交换空间
 echo "设置交换空间..."
