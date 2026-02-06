@@ -9,8 +9,8 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 ### ====== 参数 ======
-if [ -z "$1" ] || [ -z "$2" ]; then
-    echo -e "${RED}用法:${NC} $0 <LANDING_IPV4> <LANDING_IPV6>"
+if [ $# -lt 3 ]; then
+    echo -e "${RED}用法:${NC} $0 <LANDING_IPV4> <LANDING_IPV6> <端口1> [端口2 端口3 ...]"
     exit 1
 fi
 
@@ -20,8 +20,15 @@ LANDING_IPV6="$2"
 TRANSIT_PORT=51300
 LANDING_PORT=51200
 
-# 🔧 修复：添加 51300 到开放端口列表
-OPEN_PORTS=(222 80 443 51200 51201 51202 51203 51300)
+# 🔧 修改这里：从第3个参数开始获取端口列表
+shift 2  # 移除前两个IP参数
+OPEN_PORTS=("$@")  # 剩下的所有参数都是端口
+
+echo -e "${GREEN}>>>${NC} 目标 IPv4: $LANDING_IPV4"
+echo -e "${GREEN}>>>${NC} 目标 IPv6: $LANDING_IPV6"
+echo -e "${GREEN}>>>${NC} 开放端口: ${OPEN_PORTS[*]}"
+echo -e "${GREEN}>>>${NC} 中转端口: $TRANSIT_PORT"
+echo -e "${GREEN}>>>${NC} 落地端口: $LANDING_PORT"
 
 ### ====== 系统检测 ======
 detect_os() {
