@@ -30,6 +30,16 @@ echo -e "${GREEN}>>>${NC} 开放端口: ${OPEN_PORTS[*]}"
 echo -e "${GREEN}>>>${NC} 中转端口: $TRANSIT_PORT"
 echo -e "${GREEN}>>>${NC} 落地端口: $LANDING_PORT"
 
+# 清理脚本会用到的链
+iptables -F INPUT
+ip6tables -F INPUT
+iptables -t nat -F PREROUTING
+ip6tables -t nat -F PREROUTING
+iptables -t nat -F POSTROUTING
+ip6tables -t nat -F POSTROUTING
+iptables -F FORWARD
+ip6tables -F FORWARD
+
 ### ====== 系统检测 ======
 detect_os() {
     if [ -f /etc/alpine-release ]; then
