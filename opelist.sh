@@ -3,7 +3,7 @@
 #
 # OpenList Manage Script for Alpine Linux
 #
-# Version: 1.3.3-alpine
+# Version: 1.3.4-alpine
 # Last Updated: 2025-09-29
 #
 # Description:
@@ -120,11 +120,6 @@ VERSION_TAG="beta"
 VERSION_FILE="/opt/openlist/.version"
 GH_DOWNLOAD_URL="https://github.com/OpenListTeam/OpenList/releases/latest/download"
 
-# Docker 配置
-DOCKER_IMAGE_TAG="beta"
-DOCKER_CONTAINER_NAME="openlist"
-DOCKER_PORT="5244"
-
 # 获取平台架构
 if command -v arch >/dev/null 2>&1; then
     platform=$(arch)
@@ -223,6 +218,7 @@ CHECK() {
 # 全局变量
 ADMIN_USER=""
 ADMIN_PASS=""
+ADMIN_INFO_FILE="$INSTALL_PATH/data/.admin_info"
 
 # 下载文件
 download_file() {
@@ -290,11 +286,28 @@ INSTALL() {
 
         chmod +x "$INSTALL_PATH/openlist"
 
-        # 获取初始账号密码
+        # 获取初始账号密码并保存到文件
         cd "$INSTALL_PATH"
-        ACCOUNT_INFO=$("$INSTALL_PATH/openlist" admin random 2>&1)
-        ADMIN_USER=$(echo "$ACCOUNT_INFO" | grep "username:" | sed 's/.*username://' | tr -d ' ')
-        ADMIN_PASS=$(echo "$ACCOUNT_INFO" | grep "password:" | sed 's/.*password://' | tr -d ' ')
+        # 先创建data目录，否则openlist无法生成配置文件
+        mkdir -p "$INSTALL_PATH/data"
+        
+        # 检查是否已存在配置文件
+        if [ -f "$INSTALL_PATH/data/config.json" ]; then
+            echo -e "${YELLOW_COLOR}检测到现有配置文件，保留原有设置${RES}"
+        else
+            echo -e "${GREEN_COLOR}生成初始账号密码...${RES}"
+            ACCOUNT_INFO=$("$INSTALL_PATH/openlist" admin random 2>&1)
+            ADMIN_USER=$(echo "$ACCOUNT_INFO" | grep "username:" | sed 's/.*username://' | tr -d ' ')
+            ADMIN_PASS=$(echo "$ACCOUNT_INFO" | grep "password:" | sed 's/.*password://' | tr -d ' ')
+            
+            # 保存账号信息到文件
+            if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
+                echo "ADMIN_USER=$ADMIN_USER" > "$ADMIN_INFO_FILE"
+                echo "ADMIN_PASS=$ADMIN_PASS" >> "$ADMIN_INFO_FILE"
+                echo -e "${GREEN_COLOR}初始账号密码已保存到: $ADMIN_INFO_FILE${RES}"
+            fi
+        fi
+        
         cd "$CURRENT_DIR"
     else
         echo -e "${RED_COLOR}安装失败！${RES}"
@@ -319,16 +332,25 @@ INIT() {
         exit 1
     fi
 
-    # 创建 OpenRC 服务文件
+    # 创建 OpenRC 服务文件 - 修复版
     cat >/etc/init.d/openlist <<EOF
 #!/sbin/openrc-run
 
-name="openlist"
+name="OpenList"
 description="OpenList Service"
-command="$INSTALL_PATH/openlist"
-command_args="server"
-command_background=true
 pidfile="/run/openlist.pid"
+
+command="$INSTALL_PATH/openlist"
+command_args="server --data $INSTALL_PATH/data"
+command_background=true
+command_user="root"
+
+# 设置工作目录
+directory="$INSTALL_PATH"
+
+# 日志配置
+logger_stdout=true
+logger_stderr=true
 
 depend() {
     need net
@@ -336,16 +358,61 @@ depend() {
 }
 
 start_pre() {
-    checkpath -f -m 0644 -o root:root /var/log/openlist.log
+    # 确保数据目录存在
+    if [ ! -d "$INSTALL_PATH/data" ]; then
+        mkdir -p "$INSTALL_PATH/data"
+    fi
+    
+    # 检查端口是否被占用
+    if lsof -i :5244 >/dev/null 2>&1; then
+        eerror "端口 5244 已被占用"
+        return 1
+    fi
+    
+    return 0
 }
 
 start_post() {
-    echo "OpenList started successfully"
+    einfo "OpenList 服务已启动"
+    sleep 2
+    if [ -f "/run/openlist.pid" ] && kill -0 \$(cat /run/openlist.pid) 2>/dev/null; then
+        einfo "OpenList 进程运行正常"
+    else
+        eerror "OpenList 进程启动失败"
+        return 1
+    fi
+}
+
+stop_post() {
+    # 确保进程完全停止
+    local timeout=10
+    local count=0
+    
+    if [ -f "/run/openlist.pid" ]; then
+        local pid=\$(cat /run/openlist.pid)
+        while kill -0 \$pid 2>/dev/null && [ \$count -lt \$timeout ]; do
+            sleep 1
+            count=\$((count + 1))
+        done
+        
+        if kill -0 \$pid 2>/dev/null; then
+            kill -9 \$pid 2>/dev/null
+            einfo "强制停止 OpenList 进程"
+        fi
+    fi
+    
+    # 清理PID文件
+    rm -f /run/openlist.pid
+    einfo "OpenList 服务已停止"
 }
 EOF
 
     chmod +x /etc/init.d/openlist
+    
+    # 添加到默认运行级别
     rc-update add openlist default
+    
+    echo -e "${GREEN_COLOR}OpenRC 服务已配置完成${RES}"
 }
 
 # 安装成功提示
@@ -369,6 +436,11 @@ SUCCESS() {
         version_info="$REAL_VERSION"
     fi
 
+    # 尝试从保存的文件读取账号信息
+    if [ -f "$ADMIN_INFO_FILE" ]; then
+        . "$ADMIN_INFO_FILE"
+    fi
+
     echo -e "┌────────────────────────────────────────────────────┐"
     print_line "OpenList 安装成功！"
     print_line ""
@@ -378,21 +450,37 @@ SUCCESS() {
     print_line "  局域网：http://${LOCAL_IP}:5244/"
     print_line "  公网：  http://${PUBLIC_IP}:5244/"
     print_line "配置文件：$INSTALL_PATH/data/config.json"
+    print_line "安装目录：$INSTALL_PATH"
     print_line ""
     if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
         print_line "账号信息："
         print_line "默认账号：$ADMIN_USER"
         print_line "初始密码：$ADMIN_PASS"
+        print_line "账号信息文件：$ADMIN_INFO_FILE"
+    else
+        print_line "账号信息："
+        print_line "请检查文件：$ADMIN_INFO_FILE"
+        print_line "或运行: $INSTALL_PATH/openlist admin random"
     fi
     echo -e "└────────────────────────────────────────────────────┘"
     
     echo -e "\n${GREEN_COLOR}启动服务中...${RES}"
-    rc-service openlist start
+    /etc/init.d/openlist start
     
-    echo -e "\n${YELLOW_COLOR}温馨提示：如果端口无法访问，请检查防火墙和服务状态${RES}"
-    echo -e "${YELLOW_COLOR}允许端口：rc-service nftables stop 或添加规则${RES}"
+    # 检查服务状态
+    sleep 3
+    if /etc/init.d/openlist status >/dev/null 2>&1; then
+        echo -e "${GREEN_COLOR}服务启动成功！${RES}"
+    else
+        echo -e "${YELLOW_COLOR}服务启动可能有问题，请手动检查${RES}"
+        echo -e "${YELLOW_COLOR}可以尝试手动启动：$INSTALL_PATH/openlist server --data $INSTALL_PATH/data${RES}"
+    fi
+    
+    echo -e "\n${YELLOW_COLOR}温馨提示：${RES}"
+    echo -e "${YELLOW_COLOR}1. 如果端口无法访问，请检查防火墙规则${RES}"
+    echo -e "${YELLOW_COLOR}2. 允许端口命令：rc-service nftables stop 或添加规则${RES}"
+    echo -e "${YELLOW_COLOR}3. 查看日志：tail -f $INSTALL_PATH/data/openlist.log${RES}"
     echo
-    exit 0
 }
 
 # 更新 OpenList
@@ -447,7 +535,7 @@ UPDATE() {
     fi
 
     echo -e "${GREEN_COLOR}停止 OpenList 进程${RES}\r\n"
-    rc-service openlist stop
+    /etc/init.d/openlist stop
 
     cp "$INSTALL_PATH/openlist" /tmp/openlist.bak
 
@@ -456,7 +544,7 @@ UPDATE() {
         echo -e "${RED_COLOR}下载失败，更新终止${RES}"
         echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
         mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
-        rc-service openlist start
+        /etc/init.d/openlist start
         exit 1
     fi
 
@@ -464,7 +552,7 @@ UPDATE() {
         echo -e "${RED_COLOR}解压失败，更新终止${RES}"
         echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
         mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
-        rc-service openlist start
+        /etc/init.d/openlist start
         rm -f /tmp/openlist.tar.gz
         exit 1
     fi
@@ -476,7 +564,7 @@ UPDATE() {
         echo -e "${RED_COLOR}更新失败！${RES}"
         echo -e "${GREEN_COLOR}正在恢复之前的版本...${RES}"
         mv /tmp/openlist.bak "$INSTALL_PATH/openlist"
-        rc-service openlist start
+        /etc/init.d/openlist start
         rm -f /tmp/openlist.tar.gz
         exit 1
     fi
@@ -489,7 +577,7 @@ UPDATE() {
     rm -f /tmp/openlist.tar.gz /tmp/openlist.bak
 
     echo -e "${GREEN_COLOR}启动 OpenList 进程${RES}\r\n"
-    rc-service openlist restart
+    /etc/init.d/openlist restart
 
     echo -e "${GREEN_COLOR}更新完成！${RES}"
     echo -e "${GREEN_COLOR}当前版本：${RES}$REAL_VERSION"
@@ -503,7 +591,7 @@ UNINSTALL() {
     local found_path=""
     
     if [ -f "/etc/init.d/openlist" ]; then
-        found_path=$(grep "command=" /etc/init.d/openlist | cut -d'=' -f2 | sed 's|/openlist$||')
+        found_path=$(grep "command=" /etc/init.d/openlist | cut -d'=' -f2 | sed "s|/openlist.*||" | head -n1)
         if [ -f "$found_path/openlist" ]; then
             INSTALL_PATH="$found_path"
         else
@@ -543,12 +631,15 @@ UNINSTALL() {
             echo -e "${GREEN_COLOR}开始卸载...${RES}"
 
             echo -e "${GREEN_COLOR}停止 OpenList 进程${RES}"
-            rc-service openlist stop
-            rc-update del openlist
+            /etc/init.d/openlist stop
+            
+            echo -e "${GREEN_COLOR}移除 OpenRC 服务${RES}"
+            rc-update del openlist default 2>/dev/null
 
             echo -e "${GREEN_COLOR}删除 OpenList 文件${RES}"
             rm -rf "$INSTALL_PATH"
             rm -f /etc/init.d/openlist
+            rm -f /run/openlist.pid 2>/dev/null
 
             echo -e "${GREEN_COLOR}OpenList 已完全卸载${RES}"
             exit 0
@@ -573,10 +664,12 @@ SHOW_MENU() {
     echo -e "${GREEN_COLOR}5、启动 OpenList${RES}"
     echo -e "${GREEN_COLOR}6、停止 OpenList${RES}"
     echo -e "${GREEN_COLOR}7、重启 OpenList${RES}"
+    echo -e "${GREEN_COLOR}8、查看账号信息${RES}"
+    echo -e "${GREEN_COLOR}9、重置管理员密码${RES}"
     echo -e "${GREEN_COLOR}-------------------${RES}"
     echo -e "${GREEN_COLOR}0、退出脚本${RES}"
     echo
-    printf "请输入选项 [0-7]: "
+    printf "请输入选项 [0-9]: "
     read choice
     
     case "$choice" in
@@ -604,11 +697,7 @@ SHOW_MENU() {
                 return 1
             fi
             
-            if rc-service openlist status >/dev/null 2>&1; then
-                echo -e "${GREEN_COLOR}OpenList 当前状态为：运行中${RES}"
-            else
-                echo -e "${RED_COLOR}OpenList 当前状态为：停止${RES}"
-            fi
+            /etc/init.d/openlist status
             return 0
             ;;
         5)
@@ -616,7 +705,7 @@ SHOW_MENU() {
                 echo -e "\r\n${RED_COLOR}错误：系统未安装 OpenList，请先安装！${RES}\r\n"
                 return 1
             fi
-            rc-service openlist start
+            /etc/init.d/openlist start
             echo -e "${GREEN_COLOR}OpenList 已启动${RES}"
             return 0
             ;;
@@ -625,7 +714,7 @@ SHOW_MENU() {
                 echo -e "\r\n${RED_COLOR}错误：系统未安装 OpenList，请先安装！${RES}\r\n"
                 return 1
             fi
-            rc-service openlist stop
+            /etc/init.d/openlist stop
             echo -e "${GREEN_COLOR}OpenList 已停止${RES}"
             return 0
             ;;
@@ -634,8 +723,47 @@ SHOW_MENU() {
                 echo -e "\r\n${RED_COLOR}错误：系统未安装 OpenList，请先安装！${RES}\r\n"
                 return 1
             fi
-            rc-service openlist restart
+            /etc/init.d/openlist restart
             echo -e "${GREEN_COLOR}OpenList 已重启${RES}"
+            return 0
+            ;;
+        8)
+            if [ ! -f "$INSTALL_PATH/openlist" ]; then
+                echo -e "\r\n${RED_COLOR}错误：系统未安装 OpenList，请先安装！${RES}\r\n"
+                return 1
+            fi
+            
+            if [ -f "$ADMIN_INFO_FILE" ]; then
+                echo -e "${GREEN_COLOR}账号信息文件：$ADMIN_INFO_FILE${RES}"
+                cat "$ADMIN_INFO_FILE"
+            else
+                echo -e "${YELLOW_COLOR}未找到账号信息文件${RES}"
+                echo -e "${YELLOW_COLOR}您可以运行以下命令重置密码：${RES}"
+                echo -e "cd $INSTALL_PATH && ./openlist admin random"
+            fi
+            return 0
+            ;;
+        9)
+            if [ ! -f "$INSTALL_PATH/openlist" ]; then
+                echo -e "\r\n${RED_COLOR}错误：系统未安装 OpenList，请先安装！${RES}\r\n"
+                return 1
+            fi
+            
+            cd "$INSTALL_PATH"
+            echo -e "${GREEN_COLOR}正在生成新的管理员账号密码...${RES}"
+            ACCOUNT_INFO=$("$INSTALL_PATH/openlist" admin random 2>&1)
+            ADMIN_USER=$(echo "$ACCOUNT_INFO" | grep "username:" | sed 's/.*username://' | tr -d ' ')
+            ADMIN_PASS=$(echo "$ACCOUNT_INFO" | grep "password:" | sed 's/.*password://' | tr -d ' ')
+            
+            if [ -n "$ADMIN_USER" ] && [ -n "$ADMIN_PASS" ]; then
+                echo "ADMIN_USER=$ADMIN_USER" > "$ADMIN_INFO_FILE"
+                echo "ADMIN_PASS=$ADMIN_PASS" >> "$ADMIN_INFO_FILE"
+                echo -e "${GREEN_COLOR}新的账号信息已保存${RES}"
+                echo -e "用户名: $ADMIN_USER"
+                echo -e "密码: $ADMIN_PASS"
+            else
+                echo -e "${RED_COLOR}生成账号信息失败${RES}"
+            fi
             return 0
             ;;
         0)
