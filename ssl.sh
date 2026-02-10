@@ -1,454 +1,677 @@
 #!/bin/bash
 
-# ==============================================
-# Certbot SSL证书自动化管理脚本 (Root用户专用版)
-# 版本：2.3 (增加自动续签功能)
-# 最后更新：2024-05-01
-# 项目地址：https://github.com/penggan00/my-blog
-# ==============================================
+# ================= 一键SSL证书申请脚本 =================
+# 用法：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)" 邮箱 域名 API_Token
+# 示例：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)" admin@example.com example.com your_cf_token
+# ======================================================
 
-# 初始化安全设置
-set -o errexit
-set -o nounset
-set -o pipefail
+# 配置
+INSTALL_DIR="/opt/cert-manager"
+ACME_DIR="$INSTALL_DIR/acme.sh"
+CONFIG_DIR="$INSTALL_DIR/config"
+LOG_DIR="$INSTALL_DIR/logs"
 
 # 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# 配置参数
-RENEW_THRESHOLD=30  # 到期前30天自动续签
-CHECK_INTERVAL=7    # 每7天检查一次
-LOG_FILE="/var/log/certbot_renew.log"
-BACKUP_DIR="/etc/letsencrypt_backup"
-CONFIG_DIR="/etc/letsencrypt"
-
-# 初始化日志
-init_log() {
-    touch "$LOG_FILE"
-    chmod 640 "$LOG_FILE"
-    echo -e "\n$(date '+%Y-%m-%d %H:%M:%S') - 脚本启动" >> "$LOG_FILE"
+# 显示帮助
+show_help() {
+    echo -e "${YELLOW}一键SSL证书申请脚本${NC}"
+    echo ""
+    echo "用法："
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" [选项]"
+    echo ""
+    echo "选项："
+    echo "  -e, --email    邮箱地址 (用于证书通知)"
+    echo "  -d, --domain   主域名 (例如: example.com)"
+    echo "  -t, --token    Cloudflare API Token"
+    echo "  -h, --help     显示帮助信息"
+    echo ""
+    echo "示例："
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" -e admin@example.com -d example.com -t your_token"
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" --email admin@example.com --domain example.com --token your_token"
+    echo ""
+    echo "注意："
+    echo "  1. Cloudflare API Token 需要 DNS 编辑权限"
+    echo "  2. 域名必须在 Cloudflare 管理"
+    echo ""
+    echo "支持的系统："
+    echo "  ✅ Debian 9/10/11/12"
+    echo "  ✅ Ubuntu 18.04/20.04/22.04"
+    echo "  ✅ Alpine Linux"
+    echo "  ✅ CentOS/RHEL 7/8/9"
 }
 
-# 日志记录函数
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    
-    case "$level" in
-        "INFO") color="${BLUE}" ;;
-        "SUCCESS") color="${GREEN}" ;;
-        "WARNING") color="${YELLOW}" ;;
-        "ERROR") color="${RED}" ;;
-        *) color="${NC}" ;;
-    esac
-    
-    echo -e "${color}[${timestamp}] [${level}] ${message}${NC}" | tee -a "$LOG_FILE"
-}
-
-# 错误处理函数
-error_exit() {
-    log "ERROR" "$1"
-    exit 1
-}
-
-# 检查证书到期天数
-check_cert_expiry() {
-    local domain=$1
-    local cert_path="/etc/letsencrypt/live/$domain/cert.pem"
-    
-    if [ ! -f "$cert_path" ]; then
-        log "ERROR" "证书文件不存在: $cert_path"
-        return 1
-    fi
-    
-    local expiry_date=$(openssl x509 -in "$cert_path" -noout -enddate | cut -d= -f2)
-    local expiry_epoch=$(date --date="$expiry_date" +%s)
-    local now_epoch=$(date +%s)
-    local days_remaining=$(( (expiry_epoch - now_epoch) / 86400 ))
-    
-    echo "$days_remaining"
-    return 0
-}
-
-# 自动续签函数
-auto_renew() {
-    log "INFO" "开始证书自动续签检查..."
-    
-    IFS=' ' read -ra DOMAIN_ARRAY <<< "$DOMAINS"
-    local need_renew=false
-    
-    # 检查每个证书的到期时间
-    for domain in "${DOMAIN_ARRAY[@]}"; do
-        local days_left
-        days_left=$(check_cert_expiry "$domain") || continue
-        
-        log "INFO" "域名 $domain 证书剩余有效期: $days_left 天"
-        
-        if [ "$days_left" -le "$RENEW_THRESHOLD" ]; then
-            log "WARNING" "域名 $domain 证书将在 $days_left 天后到期，需要续签"
-            need_renew=true
-            break
-        fi
-    done
-    
-    # 执行续签
-    if [ "$need_renew" = true ]; then
-        log "INFO" "正在尝试续签证书..."
-        
-        if certbot renew --noninteractive --quiet; then
-            log "SUCCESS" "证书续签成功"
-            
-            # 重启相关服务
-            for service in nginx apache2 httpd; do
-                if systemctl is-active --quiet "$service"; then
-                    systemctl reload "$service" && log "INFO" "已重启服务: $service"
-                fi
-            done
-            
-            # 发送通知邮件
-            if command -v mail &>/dev/null; then
-                echo "证书续签成功于 $(hostname) 服务器，时间: $(date)" | mail -s "证书续签成功通知" "$EMAIL_USER"
-            fi
-        else
-            log "ERROR" "证书续签失败"
-            if command -v mail &>/dev/null; then
-                echo "证书续签失败于 $(hostname) 服务器，时间: $(date)" | mail -s "证书续签失败警报" "$EMAIL_USER"
-            fi
-            return 1
-        fi
+# 检测操作系统
+detect_os() {
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        OS=$ID
+        VERSION=$VERSION_ID
+    elif [ -f /etc/debian_version ]; then
+        OS="debian"
+        VERSION=$(cat /etc/debian_version)
+    elif [ -f /etc/alpine-release ]; then
+        OS="alpine"
+        VERSION=$(cat /etc/alpine-release)
     else
-        log "INFO" "所有证书有效期均超过 $RENEW_THRESHOLD 天，无需续签"
+        OS=$(uname -s)
+        VERSION=$(uname -r)
+    fi
+    
+    echo "检测到系统: $OS $VERSION"
+}
+
+# 解析命令行参数
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -e|--email)
+                EMAIL="$2"
+                shift 2
+                ;;
+            -d|--domain)
+                DOMAIN="$2"
+                shift 2
+                ;;
+            -t|--token)
+                CF_TOKEN="$2"
+                shift 2
+                ;;
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            *)
+                # 如果没有参数标识，按顺序解析
+                if [[ -z "$EMAIL" ]]; then
+                    EMAIL="$1"
+                elif [[ -z "$DOMAIN" ]]; then
+                    DOMAIN="$1"
+                elif [[ -z "$CF_TOKEN" ]]; then
+                    CF_TOKEN="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+}
+
+# 检查必需参数
+check_params() {
+    if [[ -z "$EMAIL" ]]; then
+        read -p "请输入邮箱地址: " EMAIL
+    fi
+    
+    if [[ -z "$DOMAIN" ]]; then
+        read -p "请输入主域名 (例如 example.com): " DOMAIN
+    fi
+    
+    if [[ -z "$CF_TOKEN" ]]; then
+        echo "请在 Cloudflare 创建 API Token，权限需要："
+        echo "  - Zone.Zone:Read"
+        echo "  - Zone.DNS:Edit"
+        echo "模板选择: Edit zone DNS (模板)"
+        echo "区域资源: 选择你的域名 $DOMAIN"
+        echo ""
+        read -p "请输入 Cloudflare API Token: " CF_TOKEN
     fi
 }
 
-# 系统检查
-check_system() {
-    log "INFO" "正在检查系统环境..."
-    
-    # 检查架构
-    ARCH=$(uname -m)
-    log "INFO" "系统架构: $ARCH"
-    
-    # 检查Ubuntu版本
-    if [ ! -f /etc/lsb-release ]; then
-        error_exit "此脚本仅支持Ubuntu系统"
+# 检查 Root 权限
+check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo -e "${RED}错误: 必须使用 root 权限运行此脚本${NC}"
+        exit 1
     fi
-    
-    source /etc/lsb-release
-    UBUNTU_VERSION=${DISTRIB_RELEASE}
-    
-    if [[ $(echo "$UBUNTU_VERSION < 18.04" | bc) -eq 1 ]]; then
-        error_exit "此脚本需要Ubuntu 18.04或更高版本"
-    fi
-    
-    log "INFO" "Ubuntu版本: $DISTRIB_DESCRIPTION"
 }
 
 # 安装依赖
-install_dependencies() {
-    log "INFO" "正在安装依赖..."
+install_deps() {
+    echo -e "${YELLOW}>>> 安装依赖...${NC}"
     
-    export DEBIAN_FRONTEND=noninteractive
+    # 检测操作系统并安装相应依赖
+    detect_os
     
-    apt-get update > /dev/null 2>&1 || error_exit "apt更新失败"
-    
-    local dependencies=(
-        "certbot"
-        "python3-certbot-dns-cloudflare"
-        "coreutils"
-        "mailutils"
-        "bc"
-        "jq"
-        "openssl"
-    )
-    
-    for pkg in "${dependencies[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $pkg "; then
-            if ! apt-get install -y "$pkg" > /dev/null 2>&1; then
-                log "ERROR" "安装 $pkg 失败，尝试从PPA安装..."
-                add-apt-repository -y ppa:certbot/certbot > /dev/null 2>&1
-                apt-get update > /dev/null 2>&1
-                apt-get install -y "$pkg" || error_exit "安装 $pkg 失败"
-            fi
-            log "INFO" "已安装: $pkg"
-        else
-            log "INFO" "已存在: $pkg"
-        fi
-    done
-}
-
-# 加载配置
-load_config() {
-    log "INFO" "正在加载配置..."
-    
-    # 获取脚本所在目录
-    local script_dir
-    script_dir=$(dirname "$(readlink -f "$0")")
-    local env_file="${script_dir}/.env"
-    
-    if [ -f "$env_file" ]; then
-        log "INFO" "检测到本地.env文件，加载环境变量"
-        set -o allexport
-        source "$env_file" || log "WARNING" "加载.env文件时遇到错误，继续执行..."
-        set +o allexport
-    else
-        log "WARNING" "未找到配置文件 ${env_file}，将使用手动输入"
-    fi
-    
-    # 获取Cloudflare API Token
-    while [ -z "${CFAPI:-}" ] || [ ${#CFAPI} -lt 40 ]; do
-        read -sp "请输入Cloudflare API Token: " CFAPI
-        echo ""
-        [ ${#CFAPI} -lt 40 ] && log "WARNING" "Token长度不足40字符!"
-    done
-    
-    # 获取邮箱
-    while [[ ! "${EMAIL_USER:-}" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; do
-        read -p "请输入管理员邮箱: " EMAIL_USER
-    done
-    
-    # 获取域名
-    while [ -z "${DOMAINS:-}" ]; do
-        read -p "请输入域名(多个用空格分隔): " DOMAINS
-        [ -z "$DOMAINS" ] && log "WARNING" "域名不能为空!"
-    done
-}
-
-# 备份配置
-backup_config() {
-    log "INFO" "正在备份现有证书配置..."
-    
-    mkdir -p "$BACKUP_DIR"
-    local backup_name="letsencrypt_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
-    
-    if [ -d "$CONFIG_DIR" ]; then
-        if tar -czf "${BACKUP_DIR}/${backup_name}" -C /etc letsencrypt > /dev/null 2>&1; then
-            log "SUCCESS" "配置已备份到: ${BACKUP_DIR}/${backup_name}"
-        else
-            log "WARNING" "配置备份失败"
-        fi
-    else
-        log "INFO" "未找到现有证书配置，跳过备份"
-    fi
-}
-
-# 申请证书
-request_certificates() {
-    log "INFO" "正在申请证书..."
-    
-    local cred_dir="/root/.secrets/certbot"
-    local cred_file="${cred_dir}/cloudflare.ini"
-    
-    mkdir -p "$cred_dir"
-    umask 077
-    cat > "$cred_file" <<EOF
-dns_cloudflare_api_token = ${CFAPI}
-EOF
-    
-    IFS=' ' read -ra DOMAIN_ARRAY <<< "$DOMAINS"
-    
-    # 添加成功/失败计数器
-    local success_count=0
-    local fail_count=0
-    
-    for domain in "${DOMAIN_ARRAY[@]}"; do
-        log "INFO" "正在处理域名: $domain"
-        
-        # 显示实时输出
-        if certbot certonly \
-            --dns-cloudflare \
-            --dns-cloudflare-credentials "$cred_file" \
-            --email "$EMAIL_USER" \
-            --agree-tos \
-            --non-interactive \
-            --keep-until-expiring \
-            -d "$domain"; then
-            
-            log "SUCCESS" "✓ $domain 证书申请成功"
-            ((success_count++))
-            
-            # 显示证书详细信息
-            local cert_dir="/etc/letsencrypt/live/$domain"
-            if [ -d "$cert_dir" ]; then
-                log "INFO" "证书保存路径: $cert_dir/"
-                log "INFO" "包含以下文件:"
-                ls -l "$cert_dir" | tee -a "$LOG_FILE"
-                
-                local cert_path="$cert_dir/cert.pem"
-                if [ -f "$cert_path" ]; then
-                    local expire_date=$(openssl x509 -in "$cert_path" -noout -enddate | cut -d= -f2)
-                    log "INFO" "证书有效期至: $expire_date"
-                fi
+    case $OS in
+        debian|ubuntu)
+            echo "检测到 Debian/Ubuntu 系统"
+            apt-get update
+            apt-get install -y curl git openssl nginx cron
+            ;;
+        alpine)
+            echo "检测到 Alpine Linux 系统"
+            apk update
+            apk add curl git openssl nginx busybox-initscripts busybox-suid
+            ;;
+        centos|rhel|fedora)
+            echo "检测到 CentOS/RHEL/Fedora 系统"
+            yum install -y curl git openssl nginx crontabs
+            ;;
+        *)
+            echo "未知系统，尝试安装基础依赖..."
+            # 尝试通用安装
+            if command -v apt-get &> /dev/null; then
+                apt-get update && apt-get install -y curl git openssl nginx cron
+            elif command -v yum &> /dev/null; then
+                yum install -y curl git openssl nginx crontabs
+            elif command -v apk &> /dev/null; then
+                apk update && apk add curl git openssl nginx busybox-initscripts busybox-suid
             else
-                log "WARNING" "证书目录未生成: $cert_dir"
+                echo -e "${RED}无法安装依赖，请手动安装 curl, git, openssl, nginx${NC}"
+                exit 1
             fi
-        else
-            log "ERROR" "✗ $domain 证书申请失败！可能原因:"
-            log "ERROR" "1. 域名DNS解析未指向本服务器"
-            log "ERROR" "2. Cloudflare Token权限不足"
-            log "ERROR" "3. 域名在Cloudflare未启用代理(橙色云图标)"
-            log "ERROR" "4. 证书已达到每周申请限制"
-            ((fail_count++))
-        fi
-    done
+            ;;
+    esac
     
-    shred -u "$cred_file" 2>/dev/null || rm -f "$cred_file"
-    
-    # 显示最终结果
-    log "INFO" "--------------------------------------------"
-    log "SUCCESS" "成功申请证书域名数: $success_count"
-    [ $fail_count -gt 0 ] && log "ERROR" "失败域名数: $fail_count"
-    log "INFO" "详细日志请查看: $LOG_FILE"
-    
-    # 如果全部失败则退出
-    [ $fail_count -gt 0 ] && [ $success_count -eq 0 ] && error_exit "所有域名申请失败，请检查错误日志"
+    echo -e "${GREEN}>>> 依赖安装完成${NC}"
 }
 
-# 配置自动续签
-setup_renewal() {
-    log "INFO" "正在配置自动续签..."
+# 安装 acme.sh
+install_acme() {
+    echo -e "${YELLOW}>>> 安装 acme.sh...${NC}"
     
-    local renew_script="/usr/local/bin/certbot_renew.sh"
+    mkdir -p "$INSTALL_DIR" "$CONFIG_DIR" "$LOG_DIR"
     
-    # 创建自动续签脚本
-    cat > "$renew_script" <<EOF
+    if [ ! -d "$ACME_DIR" ]; then
+        rm -rf "$ACME_DIR"
+        git clone https://github.com/acmesh-official/acme.sh.git "$ACME_DIR"
+    fi
+    
+    cd "$ACME_DIR"
+    
+    # 安装 acme.sh
+    ./acme.sh --install --home "$ACME_DIR" --accountemail "$EMAIL"
+    
+    # 强制使用 Let's Encrypt
+    ./acme.sh --set-default-ca --server letsencrypt
+    
+    echo -e "${GREEN}>>> acme.sh 安装完成${NC}"
+    
+    # ==================== 设置自动续期 ====================
+    echo -e "${YELLOW}>>> 设置自动续期...${NC}"
+    
+    # 创建续期脚本
+    cat > "/opt/cert-manager/renew-all.sh" << 'EOF'
 #!/bin/bash
-# 自动续签脚本 - 每${CHECK_INTERVAL}天执行一次检查
 
-# 加载环境变量
-if [ -f "$(dirname "\$0")/.env" ]; then
-    source "$(dirname "\$0")/.env"
+# 设置日志文件
+LOG_FILE="/opt/cert-manager/logs/renewal-$(date +%Y%m%d-%H%M%S).log"
+
+echo "===== 证书续期检查开始 $(date) =====" >> "$LOG_FILE"
+echo "系统: $(uname -a)" >> "$LOG_FILE"
+
+# 加载所有域名的配置
+if [ -f "/opt/cert-manager/config/domains.list" ]; then
+    while read DOMAIN; do
+        if [ -n "$DOMAIN" ]; then
+            CONFIG_FILE="/opt/cert-manager/config/${DOMAIN}.env"
+            if [ -f "$CONFIG_FILE" ]; then
+                # 加载域名特定的配置
+                . "$CONFIG_FILE"
+                
+                echo "检查域名: $DOMAIN" >> "$LOG_FILE"
+                
+                # 运行 acme.sh 续期检查
+                cd /opt/cert-manager/acme.sh
+                export CF_Token="$CF_TOKEN"
+                
+                # 检查并续期证书（过期前30天自动续期）
+                ./acme.sh --renew -d "$DOMAIN" --days 30 --home "/opt/cert-manager/acme.sh" 2>&1 >> "$LOG_FILE"
+                
+                RENEW_RESULT=$?
+                if [ $RENEW_RESULT -eq 0 ]; then
+                    echo "✅ $DOMAIN 证书续期成功" >> "$LOG_FILE"
+                    
+                    # 重新安装证书到 Nginx
+                    ./acme.sh --install-cert -d "$DOMAIN" \
+                        --key-file "/etc/nginx/ssl/private/$DOMAIN/key.pem" \
+                        --fullchain-file "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" \
+                        --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || rc-service nginx restart 2>/dev/null" \
+                        --force 2>&1 >> "$LOG_FILE"                   
+                    
+                else
+                    echo "⚠️  $DOMAIN 证书尚未需要续期" >> "$LOG_FILE"
+                fi
+            fi
+        fi
+    done < "/opt/cert-manager/config/domains.list"
 fi
 
-# 日志记录
-log() {
-    echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "$LOG_FILE"
+echo "===== 证书续期检查结束 $(date) =====" >> "$LOG_FILE"
+
+# 清理30天前的日志
+find /opt/cert-manager/logs -name "renewal-*.log" -mtime +30 -delete 2>/dev/null || true
+EOF
+    
+    # 设置执行权限
+    chmod +x "/opt/cert-manager/renew-all.sh"
+    
+    # 设置定时任务
+    setup_cron_job
 }
 
-# 检查证书到期天数
-check_cert_expiry() {
-    local domain=\$1
-    local cert_path="/etc/letsencrypt/live/\$domain/cert.pem"
+# 设置定时任务（根据系统类型）
+setup_cron_job() {
+    echo -e "${YELLOW}>>> 配置定时任务...${NC}"
     
-    if [ ! -f "\$cert_path" ]; then
-        log "ERROR 证书文件不存在: \$cert_path"
+    detect_os
+    
+    # 根据系统类型设置定时任务
+    case $OS in
+        debian|ubuntu|centos|rhel|fedora)
+            # 使用 cron
+            echo "0 2 * * * /opt/cert-manager/renew-all.sh" >> /etc/crontab
+            systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null || true
+            echo "已添加到 /etc/crontab"
+            ;;
+        alpine)
+            # Alpine 使用 crond
+            echo "0 2 * * * /opt/cert-manager/renew-all.sh" >> /etc/crontabs/root
+            rc-service crond restart 2>/dev/null || true
+            echo "已添加到 /etc/crontabs/root"
+            ;;
+        *)
+            # 通用方法
+            (crontab -l 2>/dev/null; echo "0 2 * * * /opt/cert-manager/renew-all.sh") | crontab -
+            echo "已添加到用户 crontab"
+            ;;
+    esac
+    
+    echo -e "${GREEN}>>> 已设置自动续期${NC}"
+    echo -e "  - 每天凌晨2点自动检查"
+    echo -e "  - 证书过期前30天自动续期"
+    echo -e "  - 续期日志: /opt/cert-manager/logs/renewal-*.log"
+}
+
+# 验证 API Token
+verify_token() {
+    echo -e "${YELLOW}>>> 验证 API Token...${NC}"
+    
+    # 获取 Zone ID
+    API_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
+        -H "Authorization: Bearer $CF_TOKEN" \
+        -H "Content-Type: application/json")
+    
+    if ! echo "$API_RESPONSE" | grep -q "success\":true"; then
+        echo -e "${RED}API Token 验证失败${NC}"
+        echo "响应: $API_RESPONSE"
         return 1
     fi
     
-    local expiry_date=\$(openssl x509 -in "\$cert_path" -noout -enddate | cut -d= -f2)
-    local expiry_epoch=\$(date --date="\$expiry_date" +%s)
-    local now_epoch=\$(date +%s)
-    local days_remaining=\$(( (expiry_epoch - now_epoch) / 86400 ))
+    ZONE_ID=$(echo "$API_RESPONSE" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    echo -e "${GREEN}>>> Token 验证成功，Zone ID: $ZONE_ID${NC}"
     
-    echo "\$days_remaining"
+    # 保存配置
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/${DOMAIN}.env" <<EOF
+EMAIL=$EMAIL
+DOMAIN=$DOMAIN
+CF_TOKEN=$CF_TOKEN
+ZONE_ID=$ZONE_ID
+CERT_DIR=/etc/nginx/ssl/certs/$DOMAIN
+KEY_DIR=/etc/nginx/ssl/private/$DOMAIN
+EOF
+    
+    echo "$DOMAIN" >> "$CONFIG_DIR/domains.list"
+    sort -u "$CONFIG_DIR/domains.list" -o "$CONFIG_DIR/domains.list"
+    
     return 0
 }
 
-# 主续签逻辑
-main_renew() {
-    log "开始证书自动续签检查..."
+# 申请证书
+issue_certificate() {
+    echo -e "${YELLOW}>>> 开始申请泛域名证书 *.$DOMAIN ...${NC}"
     
-    IFS=' ' read -ra DOMAIN_ARRAY <<< "$DOMAINS"
-    local need_renew=false
+    # 设置环境变量
+    export CF_Token="$CF_TOKEN"
     
-    # 检查每个证书的到期时间
-    for domain in "\${DOMAIN_ARRAY[@]}"; do
-        days_left=\$(check_cert_expiry "\$domain") || continue
-        
-        log "域名 \$domain 证书剩余有效期: \$days_left 天"
-        
-        if [ "\$days_left" -le "$RENEW_THRESHOLD" ]; then
-            log "WARNING 域名 \$domain 证书将在 \$days_left 天后到期，需要续签"
-            need_renew=true
-            break
-        fi
-    done
+    cd "$ACME_DIR"
     
-    # 执行续签
-    if [ "\$need_renew" = true ]; then
-        log "正在尝试续签证书..."
-        
-        if certbot renew --noninteractive --quiet; then
-            log "SUCCESS 证书续签成功"
-            
-            # 重启相关服务
-            for service in nginx apache2 httpd; do
-                if systemctl is-active --quiet "\$service"; then
-                    systemctl reload "\$service" && log "已重启服务: \$service"
-                fi
-            done
-            
-            # 发送通知邮件
-            if command -v mail &>/dev/null; then
-                echo "证书续签成功于 \$(hostname) 服务器，时间: \$(date)" | mail -s "证书续签成功通知" "$EMAIL_USER"
-            fi
-        else
-            log "ERROR 证书续签失败"
-            if command -v mail &>/dev/null; then
-                echo "证书续签失败于 \$(hostname) 服务器，时间: \$(date)" | mail -s "证书续签失败警报" "$EMAIL_USER"
-            fi
-            exit 1
-        fi
+    # 申请证书
+    LOG_FILE="$LOG_DIR/acme-$(date +%Y%m%d-%H%M%S).log"
+    
+    ./acme.sh --issue --server letsencrypt --dns dns_cf \
+        -d "$DOMAIN" -d "*.$DOMAIN" \
+        --log "$LOG_FILE" \
+        --force
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}>>> 证书申请成功!${NC}"
+        return 0
     else
-        log "所有证书有效期均超过 $RENEW_THRESHOLD 天，无需续签"
+        echo -e "${RED}>>> 证书申请失败${NC}"
+        echo "请查看日志文件: $LOG_FILE"
+        return 1
     fi
 }
 
-# 执行主函数
-main_renew
+# 安装证书到 Nginx
+install_certificate() {
+    echo -e "${YELLOW}>>> 安装证书到 Nginx...${NC}"
+    
+    # 创建证书目录
+    mkdir -p "/etc/nginx/ssl/certs/$DOMAIN"
+    mkdir -p "/etc/nginx/ssl/private/$DOMAIN"
+    mkdir -p "/etc/nginx/ssl"
+    
+    cd "$ACME_DIR"
+    
+    # 安装证书
+    ./acme.sh --install-cert -d "$DOMAIN" \
+        --key-file "/etc/nginx/ssl/private/$DOMAIN/key.pem" \
+        --fullchain-file "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" \
+        --cert-file "/etc/nginx/ssl/certs/$DOMAIN/cert.pem" \
+        --ca-file "/etc/nginx/ssl/certs/$DOMAIN/ca.pem" \
+        --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || rc-service nginx restart 2>/dev/null || true"
+    
+    # 设置权限
+    chmod 644 "/etc/nginx/ssl/certs/$DOMAIN"/*.pem
+    chmod 600 "/etc/nginx/ssl/private/$DOMAIN/key.pem"
+    
+    # 创建符号链接
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/$DOMAIN.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/$DOMAIN.key"
+    
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/ssl/certs/$DOMAIN.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/ssl/private/$DOMAIN.key"
+    
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/ssl/certs/$DOMAIN.pem"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/ssl/private/$DOMAIN.pem.key"
+    
+    mkdir -p "/etc/pki/tls/certs" "/etc/pki/tls/private"
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/pki/tls/certs/$DOMAIN.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/pki/tls/private/$DOMAIN.key"
+    
+    # ==================== 添加：Nginx 管理脚本需要的软链接 ====================
+    echo -e "${GREEN}>>> 创建 Nginx 标准软链接...${NC}"
+    
+    # 1. 创建标准软链接（Nginx 管理脚本会查找这些）
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/default.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/default.key"
+    
+    # 2. 创建通配符证书软链接
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/wildcard.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/wildcard.key"
+    
+    # 3. 创建域名简写软链接
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/$DOMAIN.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/$DOMAIN.key"
+    
+    # 4. 创建证书信息文件
+    create_cert_info_file
+    
+    echo -e "${GREEN}>>> 证书安装完成${NC}"
+}
+# 创建证书信息文件（供 Nginx 管理脚本读取）
+create_cert_info_file() {
+    local cert_info="/etc/nginx/ssl/cert-info.conf"
+    
+    cat > "$cert_info" << EOF
+# 证书信息 - 自动生成
+DOMAIN="$DOMAIN"
+CERT_TYPE="wildcard"
+CERT_FILE="/etc/nginx/ssl/certs/default.crt"
+KEY_FILE="/etc/nginx/ssl/private/default.key"
+WILDCARD_CERT="/etc/nginx/ssl/certs/wildcard.crt"
+WILDCARD_KEY="/etc/nginx/ssl/private/wildcard.key"
+ORIGINAL_CERT_DIR="/etc/nginx/ssl/certs/$DOMAIN"
+ORIGINAL_KEY_DIR="/etc/nginx/ssl/private/$DOMAIN"
+GENERATED_DATE="$(date +'%Y-%m-%d %H:%M:%S')"
 EOF
     
-    chmod 750 "$renew_script"
-    
-    # 添加cron任务
-    local cron_job="0 3 */${CHECK_INTERVAL} * * ${renew_script}"
-    
-    if ! crontab -l | grep -q "$renew_script"; then
-        (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
-        log "SUCCESS" "自动续签已配置，计划任务: $cron_job"
-    else
-        log "INFO" "自动续签任务已存在，跳过配置"
+    # 提取证书有效期信息
+    if [ -f "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" ]; then
+        local expiry_date=$(openssl x509 -in "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" -enddate -noout 2>/dev/null | cut -d= -f2)
+        if [ -n "$expiry_date" ]; then
+            echo "EXPIRY_DATE=\"$expiry_date\"" >> "$cert_info"
+        fi
     fi
     
-    # 立即执行一次检查
-    log "INFO" "正在执行首次证书检查..."
-    if bash "$renew_script"; then
-        log "SUCCESS" "首次证书检查完成"
+    chmod 644 "$cert_info"
+    echo -e "${GREEN}证书信息文件已创建: $cert_info${NC}"
+}
+# 检查证书续期状态
+check_renewal_status() {
+    echo -e "${YELLOW}>>> 检查证书续期状态...${NC}"
+    
+    # 检查定时任务
+    echo "当前定时任务:"
+    detect_os
+    
+    case $OS in
+        debian|ubuntu|centos|rhel|fedora)
+            cat /etc/crontab 2>/dev/null | grep renew-all || echo "没有找到定时任务"
+            ;;
+        alpine)
+            cat /etc/crontabs/root 2>/dev/null | grep renew-all || echo "没有找到定时任务"
+            ;;
+        *)
+            crontab -l 2>/dev/null | grep renew-all || echo "没有找到定时任务"
+            ;;
+    esac
+    
+    # 检查证书过期时间
+    if [ -f "/etc/nginx/ssl/certs/$DOMAIN/cert.pem" ]; then
+        echo ""
+        echo "证书过期时间:"
+        openssl x509 -in "/etc/nginx/ssl/certs/$DOMAIN/cert.pem" -noout -dates
+        
+        # 计算剩余天数
+        expiry_date=$(openssl x509 -in "/etc/nginx/ssl/certs/$DOMAIN/cert.pem" -noout -enddate | cut -d= -f2)
+        expiry_epoch=$(date -d "$expiry_date" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "$expiry_date" +%s 2>/dev/null)
+        current_epoch=$(date +%s)
+        days_left=$(( (expiry_epoch - current_epoch) / 86400 ))
+        
+        echo ""
+        echo "证书剩余天数: $days_left 天"
+        
+        if [ $days_left -le 30 ]; then
+            echo "⚠️  证书将在 $days_left 天后过期，将在过期前自动续期"
+        else
+            echo "✅ 证书状态良好，还有 $days_left 天过期"
+        fi
+    fi
+    
+    # 检查续期脚本是否存在
+    if [ -f "/opt/cert-manager/renew-all.sh" ]; then
+        echo ""
+        echo "✅ 续期脚本已安装: /opt/cert-manager/renew-all.sh"
     else
-        log "ERROR" "首次证书检查失败"
+        echo ""
+        echo "❌ 续期脚本未找到"
+    fi
+    
+    # 检查定时服务状态
+    if command -v systemctl &> /dev/null; then
+        if systemctl is-active cron &>/dev/null || systemctl is-active crond &>/dev/null; then
+            echo "✅ 定时服务正在运行"
+        else
+            echo "❌ 定时服务未运行"
+        fi
+    elif command -v rc-service &> /dev/null; then
+        if rc-service crond status &>/dev/null; then
+            echo "✅ crond 服务正在运行"
+        else
+            echo "❌ crond 服务未运行"
+        fi
     fi
 }
 
-# 主执行流程
+# 配置 Nginx 默认站点
+configure_nginx() {
+    echo -e "${YELLOW}>>> 配置 Nginx...${NC}"
+    
+    # 创建 Nginx 配置目录
+    mkdir -p /etc/nginx/conf.d
+    
+    # 生成默认的 fallback 证书
+    if [ ! -f "/etc/nginx/ssl/fallback.key" ]; then
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "/etc/nginx/ssl/fallback.key" \
+            -out "/etc/nginx/ssl/fallback.crt" \
+            -subj "/CN=Invalid" 2>/dev/null
+    fi
+    
+    # 创建主配置文件（如果不存在）
+    if [ ! -f /etc/nginx/nginx.conf ]; then
+        cat > /etc/nginx/nginx.conf <<'EOF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    keepalive_timeout 65;
+    client_max_body_size 100m;
+
+    access_log /var/log/nginx/access.log;
+    error_log /var/log/nginx/error.log;
+
+    include /etc/nginx/conf.d/*.conf;
+    
+    # 禁止直接IP访问
+    server {
+        listen 80 default_server;
+        listen 443 ssl default_server;
+        server_name _;
+        
+        ssl_certificate /etc/nginx/ssl/fallback.crt;
+        ssl_certificate_key /etc/nginx/ssl/fallback.key;
+        
+        return 444;
+    }
+}
+EOF
+    fi
+    
+    # 启动或重启 Nginx
+    detect_os
+    
+    case $OS in
+        debian|ubuntu|centos|rhel|fedora)
+            systemctl restart nginx 2>/dev/null || nginx -s reload 2>/dev/null || nginx
+            ;;
+        alpine)
+            rc-service nginx restart 2>/dev/null || nginx -s reload 2>/dev/null || nginx
+            ;;
+        *)
+            nginx -s reload 2>/dev/null || nginx
+            ;;
+    esac
+    
+    echo -e "${GREEN}>>> Nginx 配置完成${NC}"
+}
+
+# 显示成功信息
+show_success() {
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}        SSL 证书申请成功！              ${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo "域名: $DOMAIN"
+    echo "泛域名: *.$DOMAIN"
+    echo ""
+    echo "证书文件位置:"
+    echo "  原始证书: /etc/nginx/ssl/certs/$DOMAIN/fullchain.pem"
+    echo "  原始私钥: /etc/nginx/ssl/private/$DOMAIN/key.pem"
+    echo ""
+    echo "Nginx 标准软链接（自动检测）:"
+    echo "  默认证书: /etc/nginx/ssl/certs/default.crt"
+    echo "  默认私钥: /etc/nginx/ssl/private/default.key"
+    echo "  通配符证书: /etc/nginx/ssl/certs/wildcard.crt"
+    echo "  通配符私钥: /etc/nginx/ssl/private/wildcard.key"
+    echo ""
+    echo "快捷方式:"
+    echo "  /etc/nginx/ssl/$DOMAIN.crt"
+    echo "  /etc/nginx/ssl/$DOMAIN.key"
+    echo ""
+    echo "自动续期设置:"
+    echo "  ✅ 已设置自动续期"
+    echo "  ✅ 每天凌晨2点检查证书"
+    echo "  ✅ 证书过期前30天自动续期"
+    echo "  ✅ 续期后自动重载 Nginx"
+    echo "  ✅ 续期脚本: /opt/cert-manager/renew-all.sh"
+    echo ""
+    echo "续期日志位置:"
+    echo "  /opt/cert-manager/logs/renewal-*.log"
+    echo ""
+    echo "手动续期命令:"
+    echo "  cd $ACME_DIR && export CF_Token=\"$CF_TOKEN\" && ./acme.sh --renew -d \"$DOMAIN\" --days 30"
+    echo ""
+    echo "查看续期状态:"
+    echo "  cat /etc/crontab"
+    echo "  tail -f /opt/cert-manager/logs/renewal-*.log"
+    echo ""
+    echo "支持的系统:"
+    echo "  ✅ Debian/Ubuntu"
+    echo "  ✅ Alpine Linux"
+    echo "  ✅ CentOS/RHEL"
+    echo ""
+}
+
+# 主函数
 main() {
-    init_log
-    check_system
-    install_dependencies
-    load_config
-    backup_config
-    request_certificates
-    setup_renewal
+    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}        SSL 证书一键申请工具            ${NC}"
+    echo -e "${YELLOW}========================================${NC}"
+    echo ""
     
-    # 最终状态提示
-    log "SUCCESS" "SSL证书管理完成！"
-    echo -e "\n${GREEN}=== 操作结果 ===${NC}"
-    echo -e "证书保存路径: /etc/letsencrypt/live/YOUR_DOMAIN/"
-    echo -e "续签检查间隔: 每${CHECK_INTERVAL}天一次"
-    echo -e "自动续签阈值: 到期前${RENEW_THRESHOLD}天"
-    echo -e "续签日志文件: $LOG_FILE"
-    echo -e "手动测试续签: certbot renew --dry-run"
-    echo -e "${GREEN}=================================${NC}"
+    # 解析参数
+    parse_args "$@"
+    
+    # 检查参数
+    check_params
+    
+    # 显示配置信息
+    echo ""
+    echo -e "${YELLOW}配置信息:${NC}"
+    echo "  邮箱: $EMAIL"
+    echo "  域名: $DOMAIN"
+    echo "  Token: ${CF_TOKEN:0:10}..."
+    echo ""
+    
+    # 检查 root 权限
+    check_root
+    
+    # 安装依赖
+    install_deps
+    
+    # 安装 acme.sh（包含自动续期设置）
+    install_acme
+    
+    # 验证 API Token
+    if ! verify_token; then
+        exit 1
+    fi
+    
+    # 申请证书
+    if ! issue_certificate; then
+        exit 1
+    fi
+    
+    # 安装证书
+    install_certificate
+    
+    # 配置 Nginx
+    configure_nginx
+    
+    # 检查续期状态
+    check_renewal_status
+    
+    # 显示成功信息
+    show_success
 }
 
-if [ "$(id -u)" = "0" ]; then
-    main "$@"
-else
-    echo -e "${RED}错误：必须使用root用户执行此脚本${NC}" >&2
-    exit 1
-fi
+# 运行主函数
+main "$@"
