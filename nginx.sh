@@ -149,17 +149,17 @@ show_menu() {
 }
 
 # 1. 创建新站点 - 强制 HTTPS 版
+# 1. 创建新站点 - 强制 HTTPS 版
 create_site() {
     show_banner
     echo -e "${CYAN}[1] 创建新站点 (强制 HTTPS)${NC}"
     echo ""
     
     # 变量定义
-    local IS_REVERSE_PROXY=false
+    local IS_REVERSE_PROXY=true  # 默认反向代理
     local BACKEND_ADDRESS=""
     local SITE_NAME=""
     local SERVER_NAME=""
-    local PORT=""
     local DOCUMENT_ROOT=""
     local CONFIG_FILE=""
     
@@ -192,65 +192,37 @@ create_site() {
         fi
     done
     
-    # 获取端口（默认 443）
+    # 获取后端端口（简化输入）
+    echo ""
+    echo -e "${YELLOW}反向代理配置${NC}"
+    echo -e "默认代理到本地服务 (127.0.0.1)"
+
     while true; do
-        read -p "请输入 HTTPS 端口 (默认 443): " PORT
-        PORT=${PORT:-443}
+        read -p "请输入后端服务端口号 (如 8080, 3000, 9000): " BACKEND_PORT
         
-        if [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ]; then
-            if ss -tulpn | grep -q ":$PORT "; then
-                local service=$(ss -tulpn | grep ":$PORT " | awk '{print $NF}')
-                echo -e "${YELLOW}端口 $PORT 已被占用: $service${NC}"
-                read -p "是否继续? (y/N): " -n 1 -r
-                echo
-                [[ $REPLY =~ ^[Yy]$ ]] || continue
-            fi
+        if [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT" -ge 1 ] && [ "$BACKEND_PORT" -le 65535 ]; then
+            # 直接使用输入的端口，不检查是否被占用
+            BACKEND_ADDRESS="127.0.0.1:$BACKEND_PORT"
+            echo -e "${GREEN}后端地址: $BACKEND_ADDRESS${NC}"
             break
+        elif [ -z "$BACKEND_PORT" ]; then
+            echo -e "${RED}端口号不能为空${NC}"
         else
             echo -e "${RED}端口号必须是 1-65535 的数字${NC}"
         fi
     done
     
-    # 询问是否反向代理
-    echo ""
-    read -p "是否是反向代理到其他服务? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        IS_REVERSE_PROXY=true
-        while true; do
-            read -p "请输入后端服务地址 (如 127.0.0.1:8080): " BACKEND_ADDRESS
-            if [[ "$BACKEND_ADDRESS" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]] || [[ "$BACKEND_ADDRESS" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
-                echo -e "${GREEN}后端地址: $BACKEND_ADDRESS${NC}"
-                break
-            else
-                echo -e "${RED}格式错误，正确格式: IP:端口 或 域名:端口${NC}"
-            fi
-        done
-    else
-        IS_REVERSE_PROXY=false
-        BACKEND_ADDRESS=""
-    fi
-    
-    # 网站根目录
-    DOCUMENT_ROOT="$WWW_ROOT/$SITE_NAME"
-    
-    # 创建目录
-    echo -e "${BLUE}创建网站目录...${NC}"
-    mkdir -p "$DOCUMENT_ROOT"
-    chown -R www-data:www-data "$DOCUMENT_ROOT"
-    chmod 755 "$DOCUMENT_ROOT"
-    
     # 创建配置文件
     CONFIG_FILE="$SITES_AVAILABLE/$SITE_NAME"
     
-    if $IS_REVERSE_PROXY; then
-        # 生成反向代理配置
-        cat > "$CONFIG_FILE" << EOF
+    # 总是生成反向代理配置（不包含default_server）
+    cat > "$CONFIG_FILE" << EOF
 # 自动生成 - $(date)
 # 站点: $SITE_NAME
 # 反向代理到: $BACKEND_ADDRESS
+# 强制 HTTPS 配置
 
-# HTTP 重定向到 HTTPS（强制所有 HTTP 流量转到 HTTPS）
+# HTTP 重定向到 HTTPS
 server {
     listen 80;
     listen [::]:80;
@@ -260,10 +232,11 @@ server {
     return 301 https://\$server_name\$request_uri;
 }
 
-# HTTPS 服务器 - 反向代理
+# HTTPS 服务器
 server {
-    listen $PORT ssl http2;
-    listen [::]:$PORT ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
     server_name $SERVER_NAME;
     
     # SSL 证书
@@ -326,122 +299,30 @@ server {
     }
 }
 EOF
-    else
-        # 生成静态站点配置
-        cat > "$CONFIG_FILE" << EOF
-# 自动生成 - $(date)
-# 站点: $SITE_NAME
-# 强制 HTTPS 配置
-
-# HTTP 重定向到 HTTPS（强制所有 HTTP 流量转到 HTTPS）
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $SERVER_NAME;
-    
-    # 301 永久重定向到 HTTPS
-    return 301 https://\$server_name\$request_uri;
-}
-
-# HTTPS 服务器
-server {
-    listen $PORT ssl http2;
-    listen [::]:$PORT ssl http2;
-    server_name $SERVER_NAME;
-    
-    # SSL 证书
-    ssl_certificate $CERT_FILE;
-    ssl_certificate_key $KEY_FILE;
-    
-    # SSL 安全配置
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    
-    # HSTS 强制 HTTPS
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    
-    # 网站根目录
-    root $DOCUMENT_ROOT;
-    index index.html index.htm index.php;
-    
-    # 访问日志
-    access_log $LOG_DIR/${SITE_NAME}-access.log;
-    error_log $LOG_DIR/${SITE_NAME}-error.log;
-    
-    # 安全设置
-    location = /favicon.ico {
-        log_not_found off;
-        access_log off;
-    }
-    
-    location = /robots.txt {
-        log_not_found off;
-        access_log off;
-    }
-    
-    # 禁止访问隐藏文件
-    location ~ /\\. {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
-    
-    # 静态文件缓存
-    location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)\$ {
-        expires 1y;
-        add_header Cache-Control "public, immutable";
-        access_log off;
-    }
-    
-    # 主 location
-    location / {
-        try_files \$uri \$uri/ =404;
-    }
-    
-    # PHP 支持
-    location ~ \\.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-    }
-    
-    # 错误页面
-    error_page 404 /404.html;
-    error_page 500 502 503 504 /50x.html;
-}
-EOF
-    fi
     
     echo -e "${GREEN}✓ 配置文件已创建: $CONFIG_FILE${NC}"
-    
-    # 创建默认页面（如果不是反向代理）
-    if ! $IS_REVERSE_PROXY; then
-        create_test_page "$DOCUMENT_ROOT" "$SITE_NAME" "$PORT"
-    fi
     
     # 启用站点
     enable_site "$SITE_NAME"
     
     echo ""
     echo -e "${CYAN}站点创建完成!${NC}"
-    if $IS_REVERSE_PROXY; then
-        echo -e "${BLUE}配置类型:${NC} 反向代理"
-        echo -e "${BLUE}后端地址:${NC} http://$BACKEND_ADDRESS"
-    else
-        echo -e "${BLUE}配置类型:${NC} 静态站点"
-        echo -e "${BLUE}目录位置:${NC} $DOCUMENT_ROOT"
-    fi
-
+    echo -e "${BLUE}配置类型:${NC} 反向代理"
+    echo -e "${BLUE}后端地址:${NC} http://$BACKEND_ADDRESS"
+    echo -e "${BLUE}本地服务:${NC} 请确保本地服务已在端口 $BACKEND_PORT 运行"
+    
+    echo -e "${BLUE}监听配置:${NC}"
+    echo -e "  ${GREEN}HTTP (80):${NC} 监听所有 IPv4/IPv6 接口"
+    echo -e "  ${GREEN}HTTPS (443):${NC} 监听所有 IPv4/IPv6 接口"
+    echo -e "  ${YELLOW}安全设置:${NC} 拒绝 IP 直接访问，只能通过域名访问"
+    
     echo -e "${BLUE}访问地址:${NC}"
     echo -e "  ${GREEN}HTTPS: https://$SITE_NAME${NC}"
-    echo -e "  ${YELLOW}HTTP: http://$SITE_NAME (自动重定向到 HTTPS)${NC}"
+    echo -e "  ${YELLOW}HTTP: http://$SITE_NAME (自动强制重定向到 HTTPS)${NC}"
+    
+    echo ""
+    echo -e "${YELLOW}提醒:${NC} 请确保后端服务已启动并在端口 ${BACKEND_PORT} 监听"
+    echo -e "      可以使用命令检查: ${CYAN}ss -tulpn | grep :$BACKEND_PORT${NC}"
     
     echo ""
     read -p "按回车键继续..." -r
@@ -593,6 +474,19 @@ create_test_page() {
             gap: 8px;
             margin: 15px 0;
         }
+        
+        .listening-info {
+            background: #e8f4fc;
+            border-radius: 10px;
+            padding: 15px;
+            margin: 15px 0;
+            text-align: left;
+        }
+        
+        .listening-item {
+            margin: 5px 0;
+            padding: 5px 0;
+        }
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
 </head>
@@ -608,11 +502,11 @@ create_test_page() {
         <div class="info-box">
             <div class="info-item">
                 <span class="label"><i class="fas fa-globe"></i> 访问协议:</span>
-                <span class="value protocol">HTTPS</span>
+                <span class="value protocol">HTTPS (强制)</span>
             </div>
             <div class="info-item">
-                <span class="label"><i class="fas fa-network-wired"></i> 端口号:</span>
-                <span class="value">$port</span>
+                <span class="label"><i class="fas fa-network-wired"></i> HTTPS端口:</span>
+                <span class="value">443</span>
             </div>
             <div class="info-item">
                 <span class="label"><i class="fas fa-folder-open"></i> 网站目录:</span>
@@ -624,9 +518,23 @@ create_test_page() {
             </div>
         </div>
         
+        <div class="listening-info">
+            <div class="listening-item">
+                <i class="fas fa-check-circle" style="color: #27ae60;"></i>
+                <strong>HTTP (80端口):</strong> 监听所有 IPv4/IPv6 接口 → 强制重定向到 HTTPS
+            </div>
+            <div class="listening-item">
+                <i class="fas fa-check-circle" style="color: #27ae60;"></i>
+                <strong>HTTPS (443端口):</strong> 监听所有 IPv4/IPv6 接口，SSL/TLS 加密
+            </div>
+        </div>
+        
         <div class="quick-links">
             <button class="link-btn" onclick="location.reload()">
                 <i class="fas fa-sync-alt"></i> 刷新页面
+            </button>
+            <button class="link-btn" onclick="window.open('https://$site_name', '_blank')">
+                <i class="fas fa-external-link-alt"></i> 访问网站
             </button>
         </div>
         
@@ -680,7 +588,7 @@ enable_site() {
     reload_nginx_quiet
 }
 
-# 2. 删除站点
+# 2. 删除站点 - 简化版
 delete_site() {
     show_banner
     echo -e "${CYAN}[2] 删除站点${NC}"
@@ -688,6 +596,7 @@ delete_site() {
     
     list_sites_simple
     
+    echo ""
     read -p "请输入要删除的站点名称: " site_name
     
     if [ -z "$site_name" ]; then
@@ -698,7 +607,7 @@ delete_site() {
     
     local config_file="$SITES_AVAILABLE/$site_name"
     local enabled_link="$SITES_ENABLED/$site_name"
-    local doc_root="$WWW_ROOT/$site_name"
+    local doc_root="/var/www/$site_name"
     
     if [ ! -f "$config_file" ]; then
         echo -e "${RED}站点不存在: $site_name${NC}"
@@ -717,9 +626,9 @@ delete_site() {
     fi
     
     echo ""
-    read -p "确认删除? (输入站点名称确认): " confirm
-    
-    if [ "$confirm" != "$site_name" ]; then
+    read -p "确认删除? (Y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         echo -e "${RED}取消删除${NC}"
         read -p "按回车键继续..." -r
         return
@@ -735,14 +644,10 @@ delete_site() {
     rm -f "$config_file"
     echo -e "${GREEN}✓ 已删除配置文件${NC}"
     
-    # 询问是否删除网站目录
+    # 删除网站目录（如果存在）
     if [ -d "$doc_root" ]; then
-        read -p "是否删除网站目录 ($doc_root)? (y/N): " -n 1 -r
-        echo
-        if [[ $REPLY =~ ^[Yy]$ ]]; then
-            rm -rf "$doc_root"
-            echo -e "${GREEN}✓ 已删除网站目录${NC}"
-        fi
+        rm -rf "$doc_root"
+        echo -e "${GREEN}✓ 已删除网站目录${NC}"
     fi
     
     # 重载配置
@@ -875,7 +780,7 @@ list_sites_detailed() {
         
         # 解析配置文件获取端口
         if [ -f "$config" ]; then
-            ports=$(grep -E "listen\s+[0-9]+" "$config" | grep -v "ssl" | head -1 | awk '{print $2}' | tr -d ';' || echo "80")
+            ports="80,443"
             protocol="HTTPS"
         fi
         
@@ -886,7 +791,6 @@ list_sites_detailed() {
     echo -e "${BLUE}监听端口:${NC}"
     ss -tulpn | grep nginx || echo -e "  ${YELLOW}Nginx 未运行或未监听端口${NC}"
 }
-
 # 6. 一键安装 Nginx
 install_nginx() {
     show_banner
@@ -988,6 +892,23 @@ http {
     open_file_cache_min_uses 2;
     open_file_cache_errors on;
     
+    # 默认服务器 - 拒绝 IP 直接访问
+    server {
+        listen 80 default_server;
+        listen [::]:80 default_server;
+        server_name _;
+        return 444;  # 关闭连接，不返回任何内容
+    }
+    
+    server {
+        listen 443 ssl default_server;
+        listen [::]:443 ssl default_server;
+        server_name _;
+        ssl_certificate /etc/nginx/ssl/certs/default.crt;
+        ssl_certificate_key /etc/nginx/ssl/private/default.key;
+        return 444;  # 关闭连接，不返回任何内容
+    }
+    
     # 包含其他配置
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
@@ -1010,7 +931,6 @@ EOF
     
     read -p "按回车键继续..." -r
 }
-
 # 7. 管理 Nginx 服务
 manage_service() {
     show_banner
@@ -1164,7 +1084,7 @@ generate_test_page() {
         site_name="${sites[0]}"
     fi
     
-    local doc_root="$WWW_ROOT/$site_name"
+    local doc_root="/var/www/$site_name"
     
     if [ ! -d "$doc_root" ]; then
         echo -e "${YELLOW}网站目录不存在，是否创建? (y/N): ${NC}" -n 1 -r
@@ -1179,18 +1099,10 @@ generate_test_page() {
         fi
     fi
     
-    # 获取站点信息
-    local config_file="$SITES_AVAILABLE/$site_name"
-    local port="443"
-    
-    if [ -f "$config_file" ]; then
-        port=$(grep -E "listen\s+[0-9]+" "$config_file" | grep "ssl" | head -1 | awk '{print $2}' | tr -d ';' || echo "443")
-    fi
-    
-    create_test_page "$doc_root" "$site_name" "$port"
+    create_test_page "$doc_root" "$site_name" "443"
     
     echo -e "${GREEN}✓ 测试页面已生成${NC}"
-    echo -e "访问地址: https://$site_name:$port"
+    echo -e "访问地址: https://$site_name"
     
     echo ""
     read -p "按回车键继续..." -r
