@@ -167,7 +167,7 @@ create_site() {
     if [ -z "$DOMAIN" ] || [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
         echo -e "${RED}错误: SSL 证书未检测到${NC}"
         echo -e "请先申请证书："
-        echo -e "bash <(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)"
+        echo -e "bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)"
         echo -e ""
         read -p "按回车键返回主菜单..." -r
         return
