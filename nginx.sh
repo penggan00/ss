@@ -154,6 +154,15 @@ create_site() {
     echo -e "${CYAN}[1] 创建新站点 (强制 HTTPS)${NC}"
     echo ""
     
+    # 变量定义
+    local IS_REVERSE_PROXY=false
+    local BACKEND_ADDRESS=""
+    local SITE_NAME=""
+    local SERVER_NAME=""
+    local PORT=""
+    local DOCUMENT_ROOT=""
+    local CONFIG_FILE=""
+    
     # 检查证书
     if [ -z "$DOMAIN" ] || [ ! -f "$CERT_FILE" ] || [ ! -f "$KEY_FILE" ]; then
         echo -e "${RED}错误: SSL 证书未检测到${NC}"
@@ -202,6 +211,26 @@ create_site() {
         fi
     done
     
+    # 询问是否反向代理
+    echo ""
+    read -p "是否是反向代理到其他服务? (y/N): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        IS_REVERSE_PROXY=true
+        while true; do
+            read -p "请输入后端服务地址 (如 127.0.0.1:8080): " BACKEND_ADDRESS
+            if [[ "$BACKEND_ADDRESS" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]] || [[ "$BACKEND_ADDRESS" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+$ ]]; then
+                echo -e "${GREEN}后端地址: $BACKEND_ADDRESS${NC}"
+                break
+            else
+                echo -e "${RED}格式错误，正确格式: IP:端口 或 域名:端口${NC}"
+            fi
+        done
+    else
+        IS_REVERSE_PROXY=false
+        BACKEND_ADDRESS=""
+    fi
+    
     # 网站根目录
     DOCUMENT_ROOT="$WWW_ROOT/$SITE_NAME"
     
@@ -214,8 +243,92 @@ create_site() {
     # 创建配置文件
     CONFIG_FILE="$SITES_AVAILABLE/$SITE_NAME"
     
-    # 强制 HTTPS 配置
-    cat > "$CONFIG_FILE" << EOF
+    if $IS_REVERSE_PROXY; then
+        # 生成反向代理配置
+        cat > "$CONFIG_FILE" << EOF
+# 自动生成 - $(date)
+# 站点: $SITE_NAME
+# 反向代理到: $BACKEND_ADDRESS
+
+# HTTP 重定向到 HTTPS（强制所有 HTTP 流量转到 HTTPS）
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $SERVER_NAME;
+    
+    # 301 永久重定向到 HTTPS
+    return 301 https://\$server_name\$request_uri;
+}
+
+# HTTPS 服务器 - 反向代理
+server {
+    listen $PORT ssl http2;
+    listen [::]:$PORT ssl http2;
+    server_name $SERVER_NAME;
+    
+    # SSL 证书
+    ssl_certificate $CERT_FILE;
+    ssl_certificate_key $KEY_FILE;
+    
+    # SSL 安全配置
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # HSTS 强制 HTTPS
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
+    # 访问日志
+    access_log $LOG_DIR/${SITE_NAME}-access.log;
+    error_log $LOG_DIR/${SITE_NAME}-error.log;
+    
+    # 反向代理配置
+    location / {
+        proxy_pass http://$BACKEND_ADDRESS;
+        
+        # 重要请求头
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        
+        # WebSocket 支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # 超时设置
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+    
+    # 静态文件缓存
+    location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)\$ {
+        proxy_pass http://$BACKEND_ADDRESS;
+        proxy_set_header Host \$host;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+    
+    # 禁止访问隐藏文件
+    location ~ /\\. {
+        deny all;
+        access_log off;
+        log_not_found off;
+    }
+}
+EOF
+    else
+        # 生成静态站点配置
+        cat > "$CONFIG_FILE" << EOF
 # 自动生成 - $(date)
 # 站点: $SITE_NAME
 # 强制 HTTPS 配置
@@ -273,14 +386,14 @@ server {
     }
     
     # 禁止访问隐藏文件
-    location ~ /\. {
+    location ~ /\\. {
         deny all;
         access_log off;
         log_not_found off;
     }
     
     # 静态文件缓存
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
+    location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)\$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
         access_log off;
@@ -292,7 +405,7 @@ server {
     }
     
     # PHP 支持
-    location ~ \.php$ {
+    location ~ \\.php\$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/var/run/php/php-fpm.sock;
         fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
@@ -304,22 +417,33 @@ server {
     error_page 500 502 503 504 /50x.html;
 }
 EOF
+    fi
     
     echo -e "${GREEN}✓ 配置文件已创建: $CONFIG_FILE${NC}"
     
-    # 创建默认页面
-    create_test_page "$DOCUMENT_ROOT" "$SITE_NAME" "$PORT"
+    # 创建默认页面（如果不是反向代理）
+    if ! $IS_REVERSE_PROXY; then
+        create_test_page "$DOCUMENT_ROOT" "$SITE_NAME" "$PORT"
+    fi
     
     # 启用站点
     enable_site "$SITE_NAME"
     
     echo ""
     echo -e "${CYAN}站点创建完成!${NC}"
-    echo -e "访问地址:"
+    if $IS_REVERSE_PROXY; then
+        echo -e "${BLUE}配置类型:${NC} 反向代理"
+        echo -e "${BLUE}后端地址:${NC} http://$BACKEND_ADDRESS"
+    else
+        echo -e "${BLUE}配置类型:${NC} 静态站点"
+        echo -e "${BLUE}目录位置:${NC} $DOCUMENT_ROOT"
+    fi
+
+    echo -e "${BLUE}访问地址:${NC}"
     echo -e "  ${GREEN}HTTPS: https://$SITE_NAME${NC}"
     echo -e "  ${YELLOW}HTTP: http://$SITE_NAME (自动重定向到 HTTPS)${NC}"
-    echo -e "目录位置: $DOCUMENT_ROOT"
     
+    echo ""
     read -p "按回车键继续..." -r
 }
 
