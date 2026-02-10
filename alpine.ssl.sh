@@ -231,7 +231,8 @@ if [ -f "/opt/cert-manager/config/domains.list" ]; then
                         --key-file "/etc/nginx/ssl/private/$DOMAIN/key.pem" \
                         --fullchain-file "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" \
                         --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || rc-service nginx restart 2>/dev/null" \
-                        --force 2>&1 >> "$LOG_FILE"
+                        --force 2>&1 >> "$LOG_FILE"                   
+                    
                 else
                     echo "⚠️  $DOMAIN 证书尚未需要续期" >> "$LOG_FILE"
                 fi
@@ -385,9 +386,54 @@ install_certificate() {
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/pki/tls/certs/$DOMAIN.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/pki/tls/private/$DOMAIN.key"
     
+    # ==================== 添加：Nginx 管理脚本需要的软链接 ====================
+    echo -e "${GREEN}>>> 创建 Nginx 标准软链接...${NC}"
+    
+    # 1. 创建标准软链接（Nginx 管理脚本会查找这些）
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/default.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/default.key"
+    
+    # 2. 创建通配符证书软链接
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/wildcard.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/wildcard.key"
+    
+    # 3. 创建域名简写软链接
+    ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/$DOMAIN.crt"
+    ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/$DOMAIN.key"
+    
+    # 4. 创建证书信息文件
+    create_cert_info_file
+    
     echo -e "${GREEN}>>> 证书安装完成${NC}"
 }
-
+# 创建证书信息文件（供 Nginx 管理脚本读取）
+create_cert_info_file() {
+    local cert_info="/etc/nginx/ssl/cert-info.conf"
+    
+    cat > "$cert_info" << EOF
+# 证书信息 - 自动生成
+DOMAIN="$DOMAIN"
+CERT_TYPE="wildcard"
+CERT_FILE="/etc/nginx/ssl/certs/default.crt"
+KEY_FILE="/etc/nginx/ssl/private/default.key"
+WILDCARD_CERT="/etc/nginx/ssl/certs/wildcard.crt"
+WILDCARD_KEY="/etc/nginx/ssl/private/wildcard.key"
+ORIGINAL_CERT_DIR="/etc/nginx/ssl/certs/$DOMAIN"
+ORIGINAL_KEY_DIR="/etc/nginx/ssl/private/$DOMAIN"
+GENERATED_DATE="$(date +'%Y-%m-%d %H:%M:%S')"
+EOF
+    
+    # 提取证书有效期信息
+    if [ -f "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" ]; then
+        local expiry_date=$(openssl x509 -in "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" -enddate -noout 2>/dev/null | cut -d= -f2)
+        if [ -n "$expiry_date" ]; then
+            echo "EXPIRY_DATE=\"$expiry_date\"" >> "$cert_info"
+        fi
+    fi
+    
+    chmod 644 "$cert_info"
+    echo -e "${GREEN}证书信息文件已创建: $cert_info${NC}"
+}
 # 检查证书续期状态
 check_renewal_status() {
     echo -e "${YELLOW}>>> 检查证书续期状态...${NC}"
@@ -537,10 +583,18 @@ show_success() {
     echo "泛域名: *.$DOMAIN"
     echo ""
     echo "证书文件位置:"
-    echo "  公钥: /etc/nginx/ssl/certs/$DOMAIN/fullchain.pem"
-    echo "  私钥: /etc/nginx/ssl/private/$DOMAIN/key.pem"
-    echo "  快捷方式: /etc/nginx/ssl/$DOMAIN.crt"
-    echo "  快捷方式: /etc/nginx/ssl/$DOMAIN.key"
+    echo "  原始证书: /etc/nginx/ssl/certs/$DOMAIN/fullchain.pem"
+    echo "  原始私钥: /etc/nginx/ssl/private/$DOMAIN/key.pem"
+    echo ""
+    echo "Nginx 标准软链接（自动检测）:"
+    echo "  默认证书: /etc/nginx/ssl/certs/default.crt"
+    echo "  默认私钥: /etc/nginx/ssl/private/default.key"
+    echo "  通配符证书: /etc/nginx/ssl/certs/wildcard.crt"
+    echo "  通配符私钥: /etc/nginx/ssl/private/wildcard.key"
+    echo ""
+    echo "快捷方式:"
+    echo "  /etc/nginx/ssl/$DOMAIN.crt"
+    echo "  /etc/nginx/ssl/$DOMAIN.key"
     echo ""
     echo "自动续期设置:"
     echo "  ✅ 已设置自动续期"
