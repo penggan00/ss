@@ -318,8 +318,10 @@ server {
 
 # HTTPS服务器配置
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+
     server_name $SERVER_NAME;
     
     # SSL证书（使用检测到的证书）
