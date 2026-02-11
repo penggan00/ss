@@ -644,6 +644,44 @@ main() {
     # 检查 root 权限
     check_root
     
+    # ==================== 新增：Alpine Linux 时间同步 ====================
+    echo -e "${YELLOW}>>> 检查系统时间...${NC}"
+    detect_os
+    
+    # 如果是 Alpine Linux，强制同步时间
+    if [ "$OS" = "alpine" ]; then
+        echo "检测到 Alpine Linux，正在同步时间..."
+        
+        # 1. 安装时间同步工具
+        if ! command -v ntpdate &> /dev/null; then
+            echo "安装 ntpdate..."
+            apk add ntpdate 2>/dev/null || echo "无法安装 ntpdate，继续..."
+        fi
+        
+        # 2. 同步时间
+        echo "同步系统时间..."
+        if command -v ntpdate &> /dev/null; then
+            ntpdate time.windows.com 2>/dev/null || ntpdate pool.ntp.org 2>/dev/null || true
+        fi
+        
+        # 3. 检查时间是否正常
+        CURRENT_YEAR=$(date +%Y)
+        echo "当前年份: $CURRENT_YEAR"
+        
+        if [ "$CURRENT_YEAR" -gt 2025 ]; then
+            echo -e "${RED}警告：系统时间异常（$CURRENT_YEAR年），正在修正...${NC}"
+            # 强制修正时间到 2025年
+            date -s "2025-$(date +%m-%d\ %H:%M:%S)"
+        elif [ "$CURRENT_YEAR" -lt 2024 ]; then
+            echo -e "${RED}警告：系统时间异常（$CURRENT_YEAR年），正在修正...${NC}"
+            date -s "2025-$(date +%m-%d\ %H:%M:%S)"
+        fi
+        
+        # 4. 显示修正后的时间
+        echo "修正后时间: $(date)"
+    fi
+    # ==================== 新增结束 ====================
+    
     # 安装依赖
     install_deps
     
@@ -654,6 +692,21 @@ main() {
     if ! verify_token; then
         exit 1
     fi
+    
+    # ==================== 新增：时间验证 ====================
+    # 再次验证时间，确保不是未来时间
+    echo -e "${YELLOW}>>> 验证系统时间...${NC}"
+    CURRENT_YEAR=$(date +%Y)
+    if [ "$CURRENT_YEAR" -gt 2025 ]; then
+        echo -e "${RED}错误：系统时间异常（$CURRENT_YEAR年）${NC}"
+        echo -e "${RED}证书申请将被阻止，请先修正系统时间${NC}"
+        echo ""
+        echo "手动修正命令："
+        echo "  date -s \"2025-02-12 \$(date +%H:%M:%S)\""
+        echo "  apk add ntpdate && ntpdate time.windows.com"
+        exit 1
+    fi
+    # ==================== 新增结束 ====================
     
     # 申请证书
     if ! issue_certificate; then
