@@ -216,78 +216,92 @@ create_site() {
     CONFIG_FILE="$SITES_AVAILABLE/$SITE_NAME"
     
     # 总是生成反向代理配置（不包含default_server）
-    cat > "$CONFIG_FILE" << EOF
+# 总是生成反向代理配置（使用改进的模板）
+cat > "$CONFIG_FILE" << EOF
 # 自动生成 - $(date)
 # 站点: $SITE_NAME
 # 反向代理到: $BACKEND_ADDRESS
 # 强制 HTTPS 配置
 
-# HTTP 重定向到 HTTPS
+# HTTP重定向到HTTPS
 server {
     listen 80;
     listen [::]:80;
     server_name $SERVER_NAME;
     
+    # 安全头部
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    
     # 301 永久重定向到 HTTPS
-    return 301 https://\$server_name\$request_uri;
+    return 301 https://\\\$server_name\\\$request_uri;
 }
 
-# HTTPS 服务器
+# HTTPS服务器配置
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
     server_name $SERVER_NAME;
     
-    # SSL 证书
+    # SSL证书（使用检测到的证书）
     ssl_certificate $CERT_FILE;
     ssl_certificate_key $KEY_FILE;
     
-    # SSL 安全配置
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
+    # SSL优化
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers 'ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384';
+    ssl_prefer_server_ciphers off;
     
-    # HSTS 强制 HTTPS
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    # 安全头部
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     
     # 访问日志
-    access_log $LOG_DIR/${SITE_NAME}-access.log;
-    error_log $LOG_DIR/${SITE_NAME}-error.log;
+    access_log $LOG_DIR/${SITE_NAME}_ssl_access.log;
+    error_log $LOG_DIR/${SITE_NAME}_ssl_error.log warn;
+    
+    # 允许大文件上传
+    client_max_body_size 50M;
     
     # 反向代理配置
     location / {
         proxy_pass http://$BACKEND_ADDRESS;
         
-        # 重要请求头
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
-        
-        # WebSocket 支持
+        # WebSocket支持
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection "Upgrade";
         
-        # 超时设置
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
+        # 基础代理头
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        
+        # 禁用代理缓冲（提高实时性）
+        proxy_buffering off;
+        
+        # 连接设置
+        proxy_buffer_size 4k;
+        proxy_buffers 8 4k;
         proxy_read_timeout 60s;
+        proxy_connect_timeout 60s;
+        
+        # 保持活动连接
+        proxy_set_header Connection "";
     }
     
     # 静态文件缓存
     location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)\$ {
         proxy_pass http://$BACKEND_ADDRESS;
-        proxy_set_header Host \$host;
-        add_header Cache-Control "public, immutable";
+        proxy_set_header Host \\\$host;
+        add_header Cache-Control "public, max-age=31536000, immutable";
         access_log off;
     }
     
@@ -843,73 +857,108 @@ install_nginx() {
     
     # 创建优化的主配置文件
     echo "5. 创建主配置文件..."
-    cat > "$NGINX_DIR/nginx.conf" << 'EOF'
+# 创建优化的主配置文件
+echo "5. 创建主配置文件..."
+cat > "$NGINX_DIR/nginx.conf" << 'EOF'
 user www-data;
 worker_processes auto;
+worker_rlimit_nofile 20000;  # 调整为合理值
 pid /run/nginx.pid;
 include /etc/nginx/modules-enabled/*.conf;
 
 events {
-    worker_connections 768;
+    worker_connections 4096;
     multi_accept on;
     use epoll;
 }
 
 http {
-    # 基础设置
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_tokens off;
-    client_max_body_size 100M;
+    # 修复代理头哈希警告
+    proxy_headers_hash_max_size 1024;
+    proxy_headers_hash_bucket_size 128;
     
-    # MIME 类型
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    
-    # 日志格式
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+
+    # 优化的日志格式
     log_format main '$remote_addr - $remote_user [$time_local] "$request" '
                     '$status $body_bytes_sent "$http_referer" '
-                    '"$http_user_agent" "$http_x_forwarded_for"';
+                    '"$http_user_agent" "$http_x_forwarded_for" '
+                    'rt=$request_time uct="$upstream_connect_time" uht="$upstream_header_time" urt="$upstream_response_time"';
     
-    access_log /var/log/nginx/access.log main;
-    error_log /var/log/nginx/error.log warn;
+    # 日志缓冲（减少磁盘IO）
+    access_log  /var/log/nginx/access.log main buffer=64k flush=30s;
+    error_log   /var/log/nginx/error.log warn;
+
+    sendfile        on;
+    tcp_nopush      on;
+    tcp_nodelay     on;
+    keepalive_timeout  75s;  # 增加keepalive时间
+    keepalive_requests 1000;  # 每个连接最多请求数
     
-    # Gzip 压缩
+    types_hash_max_size 2048;
+    
+    # 隐藏服务器信息
+    proxy_hide_header X-Powered-By;
+    proxy_hide_header Server;
+    server_tokens off;  # 不显示nginx版本
+
+    # ========== 安全头 ==========
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # ========== 缓冲区设置 ==========
+    client_body_buffer_size 128K;          # 增加body缓冲区
+    client_header_buffer_size 4k;          # 增加header缓冲区
+    client_max_body_size 0;                # 不限制，由server块控制
+    large_client_header_buffers 4 8k;      # 增加大header缓冲区
+    
+    # ========== 超时设置 ==========
+    client_body_timeout 30s;               # 增加body超时
+    client_header_timeout 30s;             # 增加header超时
+    send_timeout 30s;                      # 增加发送超时
+    reset_timedout_connection on;          # 关闭超时连接
+    
+    # ========== 连接限制（防DDOS） ==========
+    limit_conn_zone $binary_remote_addr zone=perip:10m;
+    limit_conn_zone $server_name zone=perserver:10m;
+    limit_req_zone $binary_remote_addr zone=perip_req:10m rate=20r/s;
+    
+    # 全局默认限制（可以在server块覆盖）
+    limit_conn perip 20;
+    limit_conn perserver 100;
+    limit_req zone=perip_req burst=40 nodelay;
+
+    # ========== Gzip压缩 ==========
     gzip on;
     gzip_vary on;
-    gzip_proxied any;
+    gzip_min_length 1024;
     gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml text/javascript 
-               application/json application/javascript application/xml+rss 
-               application/atom+xml image/svg+xml;
+    gzip_proxied any;
+    gzip_types 
+        text/plain
+        text/css
+        text/xml
+        text/javascript
+        application/javascript
+        application/xml+rss
+        application/json
+        application/xml
+        application/x-font-ttf
+        font/opentype
+        image/svg+xml;
+    gzip_disable "msie6";
     
-    # 缓存
-    open_file_cache max=1000 inactive=20s;
-    open_file_cache_valid 30s;
-    open_file_cache_min_uses 2;
-    open_file_cache_errors on;
+    # ========== 代理设置 ==========
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 60s;
+    proxy_buffers 8 16k;
+    proxy_buffer_size 32k;
     
-    # 默认服务器 - 拒绝 IP 直接访问
-    server {
-        listen 80 default_server;
-        listen [::]:80 default_server;
-        server_name _;
-        return 444;  # 关闭连接，不返回任何内容
-    }
-    
-    server {
-        listen 443 ssl default_server;
-        listen [::]:443 ssl default_server;
-        server_name _;
-        ssl_certificate /etc/nginx/ssl/certs/default.crt;
-        ssl_certificate_key /etc/nginx/ssl/private/default.key;
-        return 444;  # 关闭连接，不返回任何内容
-    }
-    
-    # 包含其他配置
+    # ========== 包含其他配置 ==========
     include /etc/nginx/conf.d/*.conf;
     include /etc/nginx/sites-enabled/*;
 }
@@ -920,8 +969,32 @@ EOF
     systemctl start nginx
     systemctl enable nginx
     
-    # 检测域名
-    detect_domain
+# 7. 创建日志轮转配置（新增部分）
+echo "7. 创建日志轮转配置..."
+cat > "/etc/logrotate.d/nginx" << 'EOF'
+/var/log/nginx/*.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 0640 www-data adm
+    sharedscripts
+    postrotate
+        if [ -f /run/nginx.pid ]; then
+            kill -USR1 $(cat /run/nginx.pid)
+        fi
+    endscript
+}
+EOF
+echo -e "${GREEN}✓ 日志轮转配置已创建${NC}"
+
+# 8. 检测域名
+detect_domain
+
+echo ""
+echo -e "${GREEN}✓ Nginx 安装完成!${NC}"
     
     echo ""
     echo -e "${GREEN}✓ Nginx 安装完成!${NC}"
