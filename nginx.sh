@@ -149,6 +149,7 @@ show_menu() {
 }
 
 # 1. 创建新站点 - 强制 HTTPS 版
+# 1. 创建新站点 - 强制 HTTPS 版（修复变量空值问题）
 create_site() {
     show_banner
     echo -e "${CYAN}[1] 创建新站点 (强制 HTTPS)${NC}"
@@ -200,7 +201,6 @@ create_site() {
         read -p "请输入后端服务端口号 (如 8080, 3000, 9000): " BACKEND_PORT
         
         if [[ "$BACKEND_PORT" =~ ^[0-9]+$ ]] && [ "$BACKEND_PORT" -ge 1 ] && [ "$BACKEND_PORT" -le 65535 ]; then
-            # 直接使用输入的端口，不检查是否被占用
             BACKEND_ADDRESS="127.0.0.1:$BACKEND_PORT"
             echo -e "${GREEN}后端地址: $BACKEND_ADDRESS${NC}"
             break
@@ -214,88 +214,65 @@ create_site() {
     # 创建配置文件
     CONFIG_FILE="$SITES_AVAILABLE/$SITE_NAME"
     
-    # 总是生成反向代理配置（不包含default_server）
-    cat > "$CONFIG_FILE" << EOF
+    # 生成反向代理配置 - 使用正确的变量转义
+cat > "$CONFIG_FILE" << EOF
 # 自动生成 - $(date)
 # 站点: $SITE_NAME
 # 反向代理到: $BACKEND_ADDRESS
 # 强制 HTTPS 配置
 
-# HTTP 重定向到 HTTPS
 server {
     listen 80;
     listen [::]:80;
     server_name $SERVER_NAME;
-    
-    # 301 永久重定向到 HTTPS
     return 301 https://\$server_name\$request_uri;
 }
 
-# HTTPS 服务器
 server {
     listen 443 ssl;
     listen [::]:443 ssl;
     http2 on;
     server_name $SERVER_NAME;
-    
-    # SSL 证书
+
+    # SSL证书
     ssl_certificate $CERT_FILE;
     ssl_certificate_key $KEY_FILE;
     
-    # SSL 安全配置
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
+    # SSL优化
     ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-    
-    # HSTS 强制 HTTPS
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    
-    # 访问日志
-    access_log $LOG_DIR/${SITE_NAME}-access.log;
-    error_log $LOG_DIR/${SITE_NAME}-error.log;
-    
-    # 反向代理配置
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # 安全头
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+
     location / {
         proxy_pass http://$BACKEND_ADDRESS;
         
-        # 重要请求头
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header X-Forwarded-Host \$host;
-        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_set_header X-Forwarded-Port 443;
         
-        # WebSocket 支持
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Connection "";
         
-        # 超时设置
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
         proxy_read_timeout 60s;
+        proxy_buffering off;
+        proxy_request_buffering off;
     }
-    
-    # 静态文件缓存
-    location ~* \\.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)\$ {
+
+    location ~* \\.(xml|rss|atom)\$ {
         proxy_pass http://$BACKEND_ADDRESS;
-        proxy_set_header Host \$host;
-        add_header Cache-Control "public, immutable";
-        access_log off;
+        proxy_cache_valid 200 5m;
+        add_header X-Cache-Status \$upstream_cache_status;
     }
-    
-    # 禁止访问隐藏文件
-    location ~ /\\. {
-        deny all;
-        access_log off;
-        log_not_found off;
-    }
+
+    access_log $LOG_DIR/${SITE_NAME}.access.log;
+    error_log $LOG_DIR/${SITE_NAME}.error.log;
 }
 EOF
     
@@ -308,7 +285,7 @@ EOF
     echo -e "${CYAN}站点创建完成!${NC}"
     echo -e "${BLUE}配置类型:${NC} 反向代理"
     echo -e "${BLUE}后端地址:${NC} http://$BACKEND_ADDRESS"
-    echo -e "${BLUE}本地服务:${NC} 请确保本地服务已在端口 $BACKEND_PORT 运行"
+    echo -e "${BLUE}本地服务:${NC} 请确保本地服务已在端口 ${BACKEND_PORT} 运行"
     
     echo -e "${BLUE}监听配置:${NC}"
     echo -e "  ${GREEN}HTTP (80):${NC} 监听所有 IPv4/IPv6 接口"
@@ -849,69 +826,83 @@ pid /run/nginx.pid;
 include /etc/nginx/modules-enabled/*.conf;
 
 events {
-    worker_connections 768;
-    multi_accept on;
-    use epoll;
+	worker_connections 768;
+	# multi_accept on;
 }
 
 http {
-    # 基础设置
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_tokens off;
-    client_max_body_size 100M;
-    
-    # MIME 类型
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-    
-    # 日志格式
-    log_format main '$remote_addr - $remote_user [$time_local] "$request" '
-                    '$status $body_bytes_sent "$http_referer" '
-                    '"$http_user_agent" "$http_x_forwarded_for"';
-    
-    access_log /var/log/nginx/access.log main;
-    error_log /var/log/nginx/error.log warn;
-    
-    # Gzip 压缩
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css text/xml text/javascript 
-               application/json application/javascript application/xml+rss 
-               application/atom+xml image/svg+xml;
-    
-    # 缓存
-    open_file_cache max=1000 inactive=20s;
-    open_file_cache_valid 30s;
-    open_file_cache_min_uses 2;
-    open_file_cache_errors on;
-    
-    # 默认服务器 - 拒绝 IP 直接访问
-    server {
-        listen 80 default_server;
-        listen [::]:80 default_server;
-        server_name _;
-        return 444;  # 关闭连接，不返回任何内容
-    }
-    
-    server {
-        listen 443 ssl default_server;
-        listen [::]:443 ssl default_server;
-        server_name _;
-        ssl_certificate /etc/nginx/ssl/certs/default.crt;
-        ssl_certificate_key /etc/nginx/ssl/private/default.key;
-        return 444;  # 关闭连接，不返回任何内容
-    }
-    
-    # 包含其他配置
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
+
+	##
+	# Basic Settings
+	##
+
+	sendfile on;
+	tcp_nopush on;
+	types_hash_max_size 20448;
+	# server_tokens off;
+
+	# server_names_hash_bucket_size 64;
+	# server_name_in_redirect off;
+
+	include /etc/nginx/mime.types;
+	default_type application/octet-stream;
+
+	##
+	# SSL Settings
+	##
+
+	ssl_protocols TLSv1 TLSv1.1 TLSv1.2 TLSv1.3; # Dropping SSLv3, ref: POODLE
+	ssl_prefer_server_ciphers on;
+
+	##
+	# Logging Settings
+	##
+
+	access_log /var/log/nginx/access.log;
+	error_log /var/log/nginx/error.log;
+
+	##
+	# Gzip Settings
+	##
+
+	gzip on;
+
+	# gzip_vary on;
+	# gzip_proxied any;
+	# gzip_comp_level 6;
+	# gzip_buffers 16 8k;
+	# gzip_http_version 1.1;
+	# gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+
+	##
+	# Virtual Host Configs
+	##
+
+	include /etc/nginx/conf.d/*.conf;
+	include /etc/nginx/sites-enabled/*;
 }
+
+
+#mail {
+#	# See sample authentication script at:
+#	# http://wiki.nginx.org/ImapAuthenticateWithApachePhpScript
+#
+#	# auth_http localhost/auth.php;
+#	# pop3_capabilities "TOP" "USER";
+#	# imap_capabilities "IMAP4rev1" "UIDPLUS";
+#
+#	server {
+#		listen     localhost:110;
+#		protocol   pop3;
+#		proxy      on;
+#	}
+#
+#	server {
+#		listen     localhost:143;
+#		protocol   imap;
+#		proxy      on;
+#	}
+#}
 EOF
     
     # 启动服务
