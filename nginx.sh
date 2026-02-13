@@ -265,7 +265,7 @@ server {
         proxy_request_buffering off;
     }
 
-    location ~* \\.(xml|rss|atom)\$ {
+    location ~* \\.(xml|rss|atom)$ {
         proxy_pass http://$BACKEND_ADDRESS;
         proxy_cache_valid 200 5m;
         add_header X-Cache-Status \$upstream_cache_status;
