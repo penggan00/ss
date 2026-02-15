@@ -130,14 +130,17 @@ create_openrc_service() {
     local service_file="/etc/init.d/${SERVICE_NAME}"
     cat > "$service_file" << EOF
 #!/sbin/openrc-run
-
 name="komari"
 description="Komari Monitor Service"
-command="${BINARY_PATH}"
-command_args="server -l 0.0.0.0:${port} -l [::]:${port}"
+command="/opt/komari/komari"
+command_args="server -l [::]:25774"
 command_background=true
-pidfile="/run/\${RC_SVCNAME}.pid"
-directory="${DATA_DIR}"
+pidfile="/run/${RC_SVCNAME}.pid"
+directory="/opt/komari"
+
+respawn
+respawn_max 0
+respawn_delay 2
 
 depend() {
     need net
@@ -149,7 +152,7 @@ start_pre() {
 }
 
 start_post() {
-    echo "Komari 服务已启动，监听端口: ${port}"
+    echo "Komari ..............................: 25774"
 }
 EOF
 
