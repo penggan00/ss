@@ -1,74 +1,61 @@
-#!/bin/bash
+#!/bin/sh
+# Komari 安装脚本 - Alpine Linux 专用版
+# 使用方法: sh install.sh
 
-# Color definitions for terminal output
+# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Logging functions
-log_info() {
-    echo -e "$1"
-}
+# 日志函数
+log_info() { echo -e "$1"; }
+log_success() { echo -e "${GREEN}$1${NC}"; }
+log_error() { echo -e "${RED}$1${NC}"; }
+log_step() { echo -e "${YELLOW}$1${NC}"; }
 
-log_success() {
-    echo -e "${GREEN}$1${NC}"
-}
-
-log_error() {
-    echo -e "${RED}$1${NC}"
-}
-
-log_step() {
-    echo -e "${YELLOW}$1${NC}"
-}
-
-# Global variables
+# 全局变量
 INSTALL_DIR="/opt/komari"
-DATA_DIR="/opt/komari"
-SERVICE_NAME="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
+RUN_SCRIPT="$INSTALL_DIR/run.sh"
+SERVICE_NAME="komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
-LISTEN_ADDR=""
 
-# Show banner
+# 显示横幅
 show_banner() {
     clear
     echo "=============================================================="
-    echo "            Komari Monitoring System Installer"
-    echo "       https://github.com/komari-monitor/komari"
+    echo "       Komari 安装脚本 (Alpine Linux 专用)"
     echo "=============================================================="
     echo
 }
 
-# Check if running as root
+# 检查 root 权限
 check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log_error "请使用 root 权限运行此脚本"
+    if [ "$(id -u)" -ne 0 ]; then
+        log_error "请使用 root 权限运行"
         exit 1
     fi
 }
 
-# Check for systemd
-check_systemd() {
-    if ! command -v systemctl >/dev/null 2>&1; then
-        return 1
-    else
-        return 0
+# 检查 Alpine Linux 和 OpenRC
+check_alpine() {
+    if [ ! -f /etc/alpine-release ]; then
+        log_error "此脚本仅支持 Alpine Linux"
+        exit 1
     fi
+    
+    if ! command -v rc-service >/dev/null 2>&1; then
+        log_error "未检测到 OpenRC，Alpine Linux 应该自带 OpenRC"
+        exit 1
+    fi
+    
+    log_success "检测到 Alpine Linux $(cat /etc/alpine-release)"
+    log_success "OpenRC 可用"
 }
 
-# Check for OpenRC (Alpine)
-check_openrc() {
-    if command -v rc-service >/dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Detect system architecture
+# 检测架构
 detect_arch() {
     local arch=$(uname -m)
     case $arch in
@@ -78,12 +65,6 @@ detect_arch() {
         aarch64)
             echo "arm64"
             ;;
-        i386|i686)
-            echo "386"
-            ;;
-        riscv64)
-            echo "riscv64"
-            ;;
         *)
             log_error "不支持的架构: $arch"
             exit 1
@@ -91,545 +72,333 @@ detect_arch() {
     esac
 }
 
-# Check if Komari is already installed
+# 检查是否已安装
 is_installed() {
-    if [ -f "$BINARY_PATH" ]; then
-        return 0
-    else
-        return 1
-    fi
+    [ -f "$BINARY_PATH" ]
 }
 
-# Install dependencies
-install_dependencies() {
-    log_step "检查并安装依赖..."
-
-    if ! command -v curl >/dev/null 2>&1; then
-        if command -v apt >/dev/null 2>&1; then
-            log_info "使用 apt 安装依赖..."
-            apt update
-            apt install -y curl
-        elif command -v yum >/dev/null 2>&1; then
-            log_info "使用 yum 安装依赖..."
-            yum install -y curl
-        elif command -v apk >/dev/null 2>&1; then
-            log_info "使用 apk 安装依赖..."
-            apk add curl
-        else
-            log_error "未找到支持的包管理器 (apt/yum/apk)"
-            exit 1
-        fi
-    fi
+# 安装依赖
+install_deps() {
+    log_step "安装依赖..."
+    apk update
+    apk add curl
 }
 
-# Get listen address preference
-get_listen_address() {
-    echo
-    log_info "请选择监听地址："
-    echo "  1) 127.0.0.1 (仅本地访问，配合反向代理/Cloudflare Tunnel 使用) [推荐]"
-    echo "  2) 0.0.0.0   (所有网络接口，直接公网访问)"
-    echo
-    while true; do
-        read -p "请选择 [1-2] (默认: 1): " addr_choice
-        if [[ -z "$addr_choice" ]] || [[ "$addr_choice" == "1" ]]; then
-            LISTEN_ADDR="127.0.0.1"
-            log_success "已选择: 仅本地访问 (127.0.0.1)"
-            break
-        elif [[ "$addr_choice" == "2" ]]; then
-            LISTEN_ADDR="0.0.0.0"
-            log_info "已选择: 所有网络接口 (0.0.0.0)"
-            break
-        else
-            log_error "无效选项，请输入 1 或 2"
-        fi
-    done
-}
-
-# Create OpenRC service file for Alpine (轻量版 - 使用run.sh包装脚本)
-create_openrc_service() {
-    local addr="$1"
-    local port="$2"
-    log_step "创建 OpenRC 服务..."
-
-    # 创建运行脚本目录
-    mkdir -p /opt/komari
-
-    # 创建包装脚本 run.sh
-    local run_script="/opt/komari/run.sh"
-    cat > "$run_script" << 'EOF'
+# 创建自动重启脚本
+create_run_script() {
+    local port="$1"
+    log_step "创建自动重启脚本..."
+    
+    cat > "$RUN_SCRIPT" << EOF
 #!/bin/sh
-while true; do
-  /opt/komari/komari server -l 127.0.0.1:25774
-  sleep 3
-done
+# Komari 自动重启脚本
+# 第一次运行，记录密码到日志
+if [ ! -f /opt/komari/.initialized ]; then
+  $BINARY_PATH server -l 0.0.0.0:$port -l [::]:$port > /var/log/komari.log 2>&1
+  touch /opt/komari/.initialized
+else
+  # 后续运行不记录日志
+  $BINARY_PATH server -l 0.0.0.0:$port -l [::]:$port > /dev/null 2>&1
+fi
 EOF
 
-    # 如果用户选择了不同的地址或端口，修改run.sh
-    if [ "$addr" != "127.0.0.1" ] || [ "$port" != "25774" ]; then
-        sed -i "s/127.0.0.1:25774/${addr}:${port}/g" "$run_script"
-    fi
+    chmod +x "$RUN_SCRIPT"
+    log_success "自动重启脚本创建完成: $RUN_SCRIPT"
+}
 
-    chmod +x "$run_script"
-    log_success "包装脚本创建完成: $run_script"
-
-    # 创建OpenRC服务文件
-    local service_file="/etc/init.d/${SERVICE_NAME}"
+# 创建 OpenRC 服务
+create_openrc_service() {
+    log_step "创建 OpenRC 服务..."
+    
+    local service_file="/etc/init.d/$SERVICE_NAME"
     cat > "$service_file" << 'EOF'
 #!/sbin/openrc-run
+# Komari OpenRC 服务
+
 name="komari"
+description="Komari Monitor Service"
 command="/opt/komari/run.sh"
 command_background="yes"
-pidfile="/run/komari.pid"
+pidfile="/run/${RC_SVCNAME}.pid"
+command_user="root"
+
 depend() {
     need net
+    after firewall
+}
+
+start_pre() {
+    # 只在第一次创建日志文件
+    if [ ! -f /var/log/komari.log ]; then
+        touch /var/log/komari.log
+        chmod 644 /var/log/komari.log
+    fi
+    ebegin "Starting Komari"
+}
+
+start_post() {
+    eend $?
+    echo "Komari 服务已启动"
+}
+
+stop() {
+    ebegin "Stopping Komari"
+    # 杀掉所有 komari 相关进程
+    pkill -f "komari server" 2>/dev/null
+    pkill -f "run.sh" 2>/dev/null
+    eend $?
+}
+
+status() {
+    if pgrep -f "komari server" >/dev/null 2>&1; then
+        echo "status: started"
+        return 0
+    else
+        echo "status: stopped"
+        return 1
+    fi
 }
 EOF
 
     chmod +x "$service_file"
-    log_success "OpenRC 服务文件创建完成: $service_file"
+    log_success "OpenRC 服务创建完成: $service_file"
 }
 
-# Create systemd service file
-create_systemd_service() {
-    local addr="$1"
+# 获取初始密码
+get_initial_password() {
+    log_step "等待服务启动获取密码..."
+    sleep 5
+    
+    local password=""
+    # 从日志中提取密码
+    password=$(tail -20 /var/log/komari.log 2>/dev/null | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
+    
+    echo "$password"
+}
+
+# 获取本机 IP
+get_local_ip() {
+    ip route get 1 2>/dev/null | awk '{print $NF;exit}' || hostname -i 2>/dev/null | awk '{print $1}' || echo "127.0.0.1"
+}
+
+# 显示访问信息
+show_access_info() {
+    local password="$1"
     local port="$2"
-    log_step "创建 systemd 服务..."
-
-    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
-    cat > "$service_file" << EOF
-[Unit]
-Description=Komari Monitor Service
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=${BINARY_PATH} server -l ${addr}:${port}
-WorkingDirectory=${DATA_DIR}
-Restart=always
-User=root
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    log_success "systemd 服务文件创建完成"
-}
-
-# Show access information for systemd
-show_access_info_systemd() {
-    local addr="$1"
-    local password=$2
-    local port=${3:-$DEFAULT_PORT}
+    local ip=$(get_local_ip)
     
     echo
+    log_success "======================================"
     log_success "安装完成！"
+    log_success "======================================"
     echo
-    
-    if [ "$addr" == "127.0.0.1" ]; then
-        log_info "访问信息："
-        log_info "  本地地址: http://127.0.0.1:${port}"
-        log_info ""
-        log_info "⚠️  您选择了仅本地访问模式"
-        log_info "   如需通过公网访问，请配置："
-        log_info "   - 反向代理 (Nginx/Caddy)"
-        log_info "   - Cloudflare Tunnel"
-        log_info "   - SSH 隧道"
-    else
-        local ip=$(hostname -I | awk '{print $1}')
-        log_info "访问信息："
-        log_info "  URL: http://${ip}:${port}"
-    fi
-    
+    log_info "访问地址: http://$ip:$port"
     if [ -n "$password" ]; then
-        log_info ""
-        log_info "初始登录信息（仅显示一次）: $password"
+        log_info "初始密码: $password"
+        log_info "（请妥善保管，仅显示一次）"
+    else
+        log_info "初始密码: 请查看日志获取: cat /var/log/komari.log | grep 'admin account created'"
     fi
-    
     echo
     log_info "服务管理命令："
-    log_info "  状态:  systemctl status $SERVICE_NAME"
-    log_info "  启动:  systemctl start $SERVICE_NAME"
-    log_info "  停止:  systemctl stop $SERVICE_NAME"
-    log_info "  重启:  systemctl restart $SERVICE_NAME"
-    log_info "  日志:  journalctl -u $SERVICE_NAME -f"
-}
-
-# Show access information for Alpine
-show_access_info_alpine() {
-    local addr="$1"
-    local password=$2
-    local port=${3:-$DEFAULT_PORT}
-    
-    echo
-    log_success "安装完成！"
-    echo
-    
-    if [ "$addr" == "127.0.0.1" ]; then
-        log_info "访问信息："
-        log_info "  本地地址: http://127.0.0.1:${port}"
-        log_info ""
-        log_info "⚠️  您选择了仅本地访问模式"
-        log_info "   如需通过公网访问，请配置："
-        log_info "   - 反向代理 (Nginx/Caddy)"
-        log_info "   - Cloudflare Tunnel"
-        log_info "   - SSH 隧道"
-    else
-        local ip=$(hostname -I | awk '{print $1}')
-        log_info "访问信息："
-        log_info "  URL: http://${ip}:${port}"
-    fi
-    
-    if [ -n "$password" ]; then
-        log_info ""
-        log_info "初始登录信息（仅显示一次）: $password"
-    fi
-    
-    echo
-    log_info "服务管理命令："
-    log_info "  状态:  rc-service $SERVICE_NAME status"
-    log_info "  启动:  rc-service $SERVICE_NAME start"
-    log_info "  停止:  rc-service $SERVICE_NAME stop"
-    log_info "  重启:  rc-service $SERVICE_NAME restart"
+    log_info "  启动: rc-service $SERVICE_NAME start"
+    log_info "  停止: rc-service $SERVICE_NAME stop"
+    log_info "  重启: rc-service $SERVICE_NAME restart"
+    log_info "  状态: rc-service $SERVICE_NAME status"
     log_info "  开机自启: rc-update add $SERVICE_NAME"
     log_info "  取消自启: rc-update del $SERVICE_NAME"
-    log_info "  日志:  tail -f /var/log/messages"
+    echo
+    log_info "查看日志: tail -f /var/log/komari.log"
+    echo
+    log_success "======================================"
 }
 
-# Binary installation
-install_binary() {
-    log_step "开始二进制安装..."
-
+# 安装主函数
+install_komari() {
+    log_step "开始安装 Komari..."
+    
+    # 检查是否已安装
     if is_installed; then
-        log_info "Komari 已安装。要升级，请使用升级选项。"
-        return
+        log_info "Komari 已安装在 $BINARY_PATH"
+        read -p "是否重新安装？(y/N): " reinstall
+        if [ "$reinstall" != "y" ] && [ "$reinstall" != "Y" ]; then
+            return
+        fi
     fi
-
-    # 获取监听地址偏好
-    get_listen_address
-
-    # 监听端口输入，校验范围 1-65535
+    
+    # 输入端口
     while true; do
         read -p "请输入监听端口 [默认: $DEFAULT_PORT]: " input_port
-        if [[ -z "$input_port" ]]; then
+        if [ -z "$input_port" ]; then
             LISTEN_PORT="$DEFAULT_PORT"
             break
-        elif [[ "$input_port" =~ ^[0-9]+$ ]] && (( input_port >= 1 && input_port <= 65535 )); then
+        elif echo "$input_port" | grep -q '^[0-9]\+$' && [ "$input_port" -ge 1 ] && [ "$input_port" -le 65535 ]; then
             LISTEN_PORT="$input_port"
             break
         else
-            log_error "端口号无效，请输入 1-65535 之间的数字。"
+            log_error "端口无效，请输入 1-65535 之间的数字"
         fi
     done
-
-    install_dependencies
-
-    local arch=$(detect_arch)
-    log_info "检测到架构: $arch"
-
-    log_step "创建安装目录: $INSTALL_DIR"
+    
+    # 安装依赖
+    install_deps
+    
+    # 创建目录
+    log_step "创建安装目录..."
     mkdir -p "$INSTALL_DIR"
-
-    log_step "创建数据目录: $DATA_DIR"
-    mkdir -p "$DATA_DIR"
-
+    
+    # 检测架构并下载
+    local arch=$(detect_arch)
     local file_name="komari-linux-${arch}"
     local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
-
-    log_step "下载 Komari 二进制文件..."
+    
+    log_step "下载 Komari ($arch)..."
     log_info "URL: $download_url"
-
+    
     if ! curl -L -o "$BINARY_PATH" "$download_url"; then
         log_error "下载失败"
-        return 1
+        exit 1
     fi
-
+    
     chmod +x "$BINARY_PATH"
-    log_success "Komari 二进制文件安装完成: $BINARY_PATH"
-
-    # 检查是 systemd 还是 OpenRC
-    if check_systemd; then
-        log_step "检测到 systemd，创建 systemd 服务..."
-        create_systemd_service "$LISTEN_ADDR" "$LISTEN_PORT"
-        systemctl daemon-reload
-        systemctl enable ${SERVICE_NAME}.service
-        systemctl start ${SERVICE_NAME}.service
-
-        if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-            log_success "Komari 服务启动成功"
-            
-            log_step "正在获取初始密码..."
-            sleep 5 
-            local password=$(journalctl -u ${SERVICE_NAME} --since "1 minute ago" | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
-            if [ -z "$password" ]; then
-                log_error "未能获取初始密码，请检查日志"
-            fi
-            show_access_info_systemd "$LISTEN_ADDR" "$password" "$LISTEN_PORT"
-        else
-            log_error "Komari 服务启动失败"
-            log_info "查看日志: journalctl -u ${SERVICE_NAME} -f"
-            return 1
-        fi
-    elif check_openrc; then
-        log_step "检测到 OpenRC (Alpine)，创建 OpenRC 服务..."
-        create_openrc_service "$LISTEN_ADDR" "$LISTEN_PORT"
-        
-        # 添加到开机自启
-        rc-update add "$SERVICE_NAME" default
-        
-        # 启动服务
-        rc-service "$SERVICE_NAME" start
-        
-        sleep 3
-        
-        if rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
-            log_success "Komari 服务启动成功"
-            
-            log_step "正在获取初始密码..."
-            sleep 5
-            local password=""
-            # 对于Alpine，需要从系统日志获取密码
-            if [ -f "/var/log/messages" ]; then
-                password=$(tail -20 /var/log/messages | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
-            fi
-            
-            if [ -z "$password" ]; then
-                log_error "未能获取初始密码，请检查日志: tail -f /var/log/messages"
-                log_info "提示: 密码会在第一次启动时生成，如果没看到，请等待几秒后查看 /var/log/messages"
-            fi
-            show_access_info_alpine "$LISTEN_ADDR" "$password" "$LISTEN_PORT"
-        else
-            log_error "Komari 服务启动失败"
-            log_info "查看日志: tail -f /var/log/messages"
-            return 1
-        fi
-    else
-        log_step "警告：未检测到 systemd 或 OpenRC，跳过服务创建。"
-        log_step "您可以从命令行手动运行 Komari："
-        log_step "    $BINARY_PATH server -l $LISTEN_ADDR:$LISTEN_PORT"
-        echo
-        log_success "安装完成！"
-        return
-    fi
-}
-
-# Upgrade function
-upgrade_komari() {
-    log_step "升级 Komari..."
-
-    if ! is_installed; then
-        log_error "Komari 未安装。请先安装它。"
-        return 1
-    fi
-
-    if check_systemd; then
-        log_step "停止 Komari 服务 (systemd)..."
-        systemctl stop ${SERVICE_NAME}.service
-    elif check_openrc; then
-        log_step "停止 Komari 服务 (OpenRC)..."
+    log_success "二进制文件安装完成"
+    
+    # 创建自动重启脚本
+    create_run_script "$LISTEN_PORT"
+    
+    # 创建 OpenRC 服务
+    create_openrc_service
+    
+    # 停止旧服务（如果存在）
+    if rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
         rc-service "$SERVICE_NAME" stop
-    else
-        log_error "未检测到 systemd 或 OpenRC。无法管理服务。"
-        return 1
     fi
-
-    log_step "备份当前二进制文件..."
-    cp "$BINARY_PATH" "${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
-
-    local arch=$(detect_arch)
-    local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
-
-    log_step "下载最新版本..."
-    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
-        log_error "下载失败，正在从备份恢复"
-        mv "${BINARY_PATH}.backup."* "$BINARY_PATH"
-        
-        if check_systemd; then
-            systemctl start ${SERVICE_NAME}.service
-        elif check_openrc; then
-            rc-service "$SERVICE_NAME" start
-        fi
-        return 1
-    fi
-
-    chmod +x "$BINARY_PATH"
-
-    log_step "重启 Komari 服务..."
-    if check_systemd; then
-        systemctl start ${SERVICE_NAME}.service
-        if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-            log_success "Komari 升级成功"
-        else
-            log_error "服务在升级后未能启动"
-        fi
-    elif check_openrc; then
-        rc-service "$SERVICE_NAME" start
-        if rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
-            log_success "Komari 升级成功"
-        else
-            log_error "服务在升级后未能启动"
-        fi
-    fi
+    
+    # 添加到开机自启
+    rc-update add "$SERVICE_NAME" default
+    
+    # 启动服务
+    log_step "启动服务..."
+    rc-service "$SERVICE_NAME" start
+    
+    # 获取密码并显示信息
+    local password=$(get_initial_password)
+    show_access_info "$password" "$LISTEN_PORT"
 }
 
-# Uninstall function
+# 卸载函数
 uninstall_komari() {
     log_step "卸载 Komari..."
-
+    
     if ! is_installed; then
         log_info "Komari 未安装"
-        return 0
+        return
     fi
-
-    read -p "这将删除 Komari。您确定吗？(y/N): " confirm
-    if [[ ! $confirm =~ ^[Yy]$ ]]; then
-        log_info "卸载已取消"
-        return 0
+    
+    read -p "确定要卸载 Komari 吗？(y/N): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        log_info "取消卸载"
+        return
     fi
-
-    if check_systemd; then
-        log_step "停止并禁用服务 (systemd)..."
-        systemctl stop ${SERVICE_NAME}.service >/dev/null 2>&1
-        systemctl disable ${SERVICE_NAME}.service >/dev/null 2>&1
-        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-        systemctl daemon-reload
-        log_success "systemd 服务已删除"
-    elif check_openrc; then
-        log_step "停止并禁用服务 (OpenRC)..."
-        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1
-        rc-update del "$SERVICE_NAME" >/dev/null 2>&1
-        rm -f "/etc/init.d/${SERVICE_NAME}"
-        rm -f "/opt/komari/run.sh"
+    
+    # 停止并删除服务
+    if [ -f "/etc/init.d/$SERVICE_NAME" ]; then
+        rc-service "$SERVICE_NAME" stop 2>/dev/null
+        rc-update del "$SERVICE_NAME" 2>/dev/null
+        rm -f "/etc/init.d/$SERVICE_NAME"
         log_success "OpenRC 服务已删除"
     fi
-
-    log_step "删除二进制文件..."
+    
+    # 删除文件
     rm -f "$BINARY_PATH"
-    # 尝试在目录为空时删除该目录
-    rmdir "$INSTALL_DIR" 2>/dev/null || log_info "数据目录 $INSTALL_DIR 不为空，未删除"
-    log_success "Komari 二进制文件已删除"
-
-    log_success "Komari 卸载完成"
-    log_info "数据文件保留在 $DATA_DIR"
+    rm -f "$RUN_SCRIPT"
+    
+    # 尝试删除目录（如果为空）
+    rmdir "$INSTALL_DIR" 2>/dev/null || log_info "目录 $INSTALL_DIR 不为空，保留"
+    
+    log_success "卸载完成"
+    log_info "日志文件保留在 /var/log/komari.log"
 }
 
-# Show service status
+# 查看状态
 show_status() {
     if ! is_installed; then
         log_error "Komari 未安装"
         return
     fi
     
-    if check_systemd; then
-        log_step "Komari 服务状态 (systemd):"
-        systemctl status ${SERVICE_NAME}.service --no-pager -l
-    elif check_openrc; then
-        log_step "Komari 服务状态 (OpenRC):"
-        rc-service "$SERVICE_NAME" status
+    if rc-service "$SERVICE_NAME" status; then
+        log_success "Komari 正在运行"
     else
-        log_error "未检测到 systemd 或 OpenRC。无法获取服务状态。"
+        log_error "Komari 未运行"
     fi
 }
 
-# Show service logs
+# 查看日志
 show_logs() {
-    if ! is_installed; then
-        log_error "Komari 未安装"
-        return
-    fi
-    
-    if check_systemd; then
-        log_step "查看 Komari 服务日志 (systemd)..."
-        journalctl -u ${SERVICE_NAME} -f --no-pager
-    elif check_openrc; then
-        log_step "查看 Komari 服务日志 (OpenRC)..."
-        if [ -f "/var/log/messages" ]; then
-            tail -f /var/log/messages | grep --line-buffered "komari\|komari server"
-        else
-            log_error "日志文件不存在: /var/log/messages"
-        fi
+    if [ -f "/var/log/komari.log" ]; then
+        tail -f /var/log/komari.log
     else
-        log_error "未检测到 systemd 或 OpenRC。无法获取服务日志。"
+        log_error "日志文件不存在"
     fi
 }
 
-# Restart service
+# 重启服务
 restart_service() {
     if ! is_installed; then
         log_error "Komari 未安装"
         return
     fi
     
-    if check_systemd; then
-        log_step "重启 Komari 服务 (systemd)..."
-        systemctl restart ${SERVICE_NAME}.service
-        if systemctl is-active --quiet ${SERVICE_NAME}.service; then
-            log_success "服务重启成功"
-        else
-            log_error "服务重启失败"
-        fi
-    elif check_openrc; then
-        log_step "重启 Komari 服务 (OpenRC)..."
-        rc-service "$SERVICE_NAME" restart
-        if rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
-            log_success "服务重启成功"
-        else
-            log_error "服务重启失败"
-        fi
-    else
-        log_error "未检测到 systemd 或 OpenRC。无法重启服务。"
-    fi
+    rc-service "$SERVICE_NAME" restart
+    log_success "服务已重启"
 }
 
-# Stop service
+# 停止服务
 stop_service() {
     if ! is_installed; then
         log_error "Komari 未安装"
         return
     fi
     
-    if check_systemd; then
-        log_step "停止 Komari 服务 (systemd)..."
-        systemctl stop ${SERVICE_NAME}.service
-        log_success "服务已停止"
-    elif check_openrc; then
-        log_step "停止 Komari 服务 (OpenRC)..."
-        rc-service "$SERVICE_NAME" stop
-        log_success "服务已停止"
-    else
-        log_error "未检测到 systemd 或 OpenRC。无法停止服务。"
-    fi
+    rc-service "$SERVICE_NAME" stop
+    log_success "服务已停止"
 }
 
-# Main menu
+# 主菜单
 main_menu() {
     show_banner
+    
     echo "请选择操作："
     echo "  1) 安装 Komari"
-    echo "  2) 升级 Komari"
-    echo "  3) 卸载 Komari"
-    echo "  4) 查看状态"
-    echo "  5) 查看日志"
-    echo "  6) 重启服务"
-    echo "  7) 停止服务"
-    echo "  8) 退出"
+    echo "  2) 卸载 Komari"
+    echo "  3) 查看状态"
+    echo "  4) 查看日志"
+    echo "  5) 重启服务"
+    echo "  6) 停止服务"
+    echo "  7) 退出"
     echo
-
-    read -p "输入选项 [1-8]: " choice
-
+    
+    read -p "输入选项 [1-7]: " choice
+    
     case $choice in
-        1) install_binary ;;
-        2) upgrade_komari ;;
-        3) uninstall_komari ;;
-        4) show_status ;;
-        5) show_logs ;;
-        6) restart_service ;;
-        7) stop_service ;;
-        8) exit 0 ;;
+        1) install_komari ;;
+        2) uninstall_komari ;;
+        3) show_status ;;
+        4) show_logs ;;
+        5) restart_service ;;
+        6) stop_service ;;
+        7) exit 0 ;;
         *) log_error "无效选项" ;;
     esac
 }
 
-# Main execution
-check_root
-main_menu
+# 主程序
+main() {
+    check_root
+    check_alpine
+    main_menu
+}
+
+# 运行主程序
+main
