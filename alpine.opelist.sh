@@ -332,25 +332,26 @@ INIT() {
         exit 1
     fi
 
-    # 创建 OpenRC 服务文件 - 修复版
+    # 创建自动重启脚本
+    cat > "$INSTALL_PATH/run.sh" << EOF
+#!/bin/sh
+while true; do
+  $INSTALL_PATH/openlist server --data $INSTALL_PATH/data
+  echo "\$(date): OpenList 进程退出，3秒后重启..." >> /var/log/openlist-monitor.log
+  sleep 3
+done
+EOF
+    chmod +x "$INSTALL_PATH/run.sh"
+
+    # 创建 OpenRC 服务文件
     cat >/etc/init.d/openlist <<EOF
 #!/sbin/openrc-run
-
 name="OpenList"
-description="OpenList Service"
+description="OpenList Service with Auto-Restart"
+command="$INSTALL_PATH/run.sh"
+command_background="yes"
 pidfile="/run/openlist.pid"
-
-command="$INSTALL_PATH/openlist"
-command_args="server --data $INSTALL_PATH/data"
-command_background=true
 command_user="root"
-
-# 设置工作目录
-directory="$INSTALL_PATH"
-
-# 日志配置
-logger_stdout=true
-logger_stderr=true
 
 depend() {
     need net
@@ -358,61 +359,38 @@ depend() {
 }
 
 start_pre() {
-    # 确保数据目录存在
     if [ ! -d "$INSTALL_PATH/data" ]; then
         mkdir -p "$INSTALL_PATH/data"
     fi
-    
-    # 检查端口是否被占用
-    if lsof -i :5244 >/dev/null 2>&1; then
-        eerror "端口 5244 已被占用"
-        return 1
-    fi
-    
-    return 0
+    ebegin "Starting OpenList"
 }
 
 start_post() {
-    einfo "OpenList 服务已启动"
-    sleep 2
-    if [ -f "/run/openlist.pid" ] && kill -0 \$(cat /run/openlist.pid) 2>/dev/null; then
-        einfo "OpenList 进程运行正常"
-    else
-        eerror "OpenList 进程启动失败"
-        return 1
-    fi
+    eend \$?
 }
 
-stop_post() {
-    # 确保进程完全停止
-    local timeout=10
-    local count=0
-    
-    if [ -f "/run/openlist.pid" ]; then
-        local pid=\$(cat /run/openlist.pid)
-        while kill -0 \$pid 2>/dev/null && [ \$count -lt \$timeout ]; do
-            sleep 1
-            count=\$((count + 1))
-        done
-        
-        if kill -0 \$pid 2>/dev/null; then
-            kill -9 \$pid 2>/dev/null
-            einfo "强制停止 OpenList 进程"
-        fi
+stop() {
+    ebegin "Stopping OpenList"
+    pkill -f "openlist server" 2>/dev/null
+    pkill -f "run.sh" 2>/dev/null
+    eend \$?
+}
+
+status() {
+    if pgrep -f "openlist server" >/dev/null 2>&1; then
+        echo "status: started"
+        return 0
+    else
+        echo "status: stopped"
+        return 1
     fi
-    
-    # 清理PID文件
-    rm -f /run/openlist.pid
-    einfo "OpenList 服务已停止"
 }
 EOF
 
     chmod +x /etc/init.d/openlist
-    
-    # 添加到默认运行级别
     rc-update add openlist default
     
-    echo -e "${GREEN_COLOR}OpenRC 服务已配置完成${RES}"
+    echo -e "${GREEN_COLOR}OpenRC 服务已配置完成（自动重启模式）${RES}"
 }
 
 # 安装成功提示
