@@ -145,36 +145,46 @@ get_listen_address() {
     done
 }
 
-# Create OpenRC service file for Alpine (优化版本)
+# Create OpenRC service file for Alpine (轻量版 - 使用run.sh包装脚本)
 create_openrc_service() {
     local addr="$1"
     local port="$2"
     log_step "创建 OpenRC 服务..."
 
+    # 创建运行脚本目录
+    mkdir -p /opt/komari
+
+    # 创建包装脚本 run.sh
+    local run_script="/opt/komari/run.sh"
+    cat > "$run_script" << 'EOF'
+#!/bin/sh
+while true; do
+  /opt/komari/komari server -l 127.0.0.1:25774
+  sleep 3
+done
+EOF
+
+    # 如果用户选择了不同的地址或端口，修改run.sh
+    if [ "$addr" != "127.0.0.1" ] || [ "$port" != "25774" ]; then
+        sed -i "s/127.0.0.1:25774/${addr}:${port}/g" "$run_script"
+    fi
+
+    chmod +x "$run_script"
+    log_success "包装脚本创建完成: $run_script"
+
+    # 创建OpenRC服务文件
     local service_file="/etc/init.d/${SERVICE_NAME}"
     cat > "$service_file" << 'EOF'
 #!/sbin/openrc-run
-
 name="komari"
-description="Komari Monitor"
-command="/opt/komari/komari"
-command_args="server -l 127.0.0.1:25774"
+command="/opt/komari/run.sh"
 command_background="yes"
-pidfile="/run/${RC_SVCNAME}.pid"
-
-respawn_delay=3
-respawn_max=0
-respawn_period=10
-
+pidfile="/run/komari.pid"
 depend() {
-  need net
+    need net
 }
 EOF
 
-    # 替换地址和端口占位符
-    sed -i "s/ADDR_PLACEHOLDER/${addr}/g" "$service_file"
-    sed -i "s/PORT_PLACEHOLDER/${port}/g" "$service_file"
-    
     chmod +x "$service_file"
     log_success "OpenRC 服务文件创建完成: $service_file"
 }
@@ -282,7 +292,7 @@ show_access_info_alpine() {
     log_info "  重启:  rc-service $SERVICE_NAME restart"
     log_info "  开机自启: rc-update add $SERVICE_NAME"
     log_info "  取消自启: rc-update del $SERVICE_NAME"
-    log_info "  日志:  tail -f /var/log/komari.log"
+    log_info "  日志:  tail -f /var/log/messages"
 }
 
 # Binary installation
@@ -377,17 +387,19 @@ install_binary() {
             log_step "正在获取初始密码..."
             sleep 5
             local password=""
-            if [ -f "/var/log/komari.log" ]; then
-                password=$(tail -20 /var/log/komari.log | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
+            # 对于Alpine，需要从系统日志获取密码
+            if [ -f "/var/log/messages" ]; then
+                password=$(tail -20 /var/log/messages | grep "admin account created." | tail -n 1 | sed -e 's/.*admin account created.//')
             fi
             
             if [ -z "$password" ]; then
-                log_error "未能获取初始密码，请检查日志: tail -f /var/log/komari.log"
+                log_error "未能获取初始密码，请检查日志: tail -f /var/log/messages"
+                log_info "提示: 密码会在第一次启动时生成，如果没看到，请等待几秒后查看 /var/log/messages"
             fi
             show_access_info_alpine "$LISTEN_ADDR" "$password" "$LISTEN_PORT"
         else
             log_error "Komari 服务启动失败"
-            log_info "查看日志: tail -f /var/log/komari.log"
+            log_info "查看日志: tail -f /var/log/messages"
             return 1
         fi
     else
@@ -487,6 +499,7 @@ uninstall_komari() {
         rc-service "$SERVICE_NAME" stop >/dev/null 2>&1
         rc-update del "$SERVICE_NAME" >/dev/null 2>&1
         rm -f "/etc/init.d/${SERVICE_NAME}"
+        rm -f "/opt/komari/run.sh"
         log_success "OpenRC 服务已删除"
     fi
 
@@ -530,10 +543,10 @@ show_logs() {
         journalctl -u ${SERVICE_NAME} -f --no-pager
     elif check_openrc; then
         log_step "查看 Komari 服务日志 (OpenRC)..."
-        if [ -f "/var/log/komari.log" ]; then
-            tail -f /var/log/komari.log
+        if [ -f "/var/log/messages" ]; then
+            tail -f /var/log/messages | grep --line-buffered "komari\|komari server"
         else
-            log_error "日志文件不存在: /var/log/komari.log"
+            log_error "日志文件不存在: /var/log/messages"
         fi
     else
         log_error "未检测到 systemd 或 OpenRC。无法获取服务日志。"
