@@ -156,14 +156,15 @@ create_openrc_service() {
 #!/sbin/openrc-run
 
 name="komari"
-description="Komari Monitor Service"
+description="Komari Monitor"
 command="/opt/komari/komari"
-command_args="server -l ADDR_PLACEHOLDER:PORT_PLACEHOLDER"
+command_args="server -l 127.0.0.1:25774"
 command_background="yes"
 command_user="root"
 pidfile="/run/${RC_SVCNAME}.pid"
-output_log="/var/log/komari.log"
-error_log="/var/log/komari.err.log"
+
+supervisor="s6"
+supervise_daemon="yes"
 
 respawn_delay="3"
 respawn_max="0"
@@ -172,11 +173,6 @@ depend() {
   need net
   use dns
   after firewall
-}
-
-start_pre() {
-  checkpath -f -m 0644 -o root:root /var/log/komari.log
-  checkpath -f -m 0644 -o root:root /var/log/komari.err.log
 }
 EOF
 
