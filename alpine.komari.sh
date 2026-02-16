@@ -160,19 +160,14 @@ description="Komari Monitor"
 command="/opt/komari/komari"
 command_args="server -l 127.0.0.1:25774"
 command_background="yes"
-command_user="root"
 pidfile="/run/${RC_SVCNAME}.pid"
 
-supervisor="s6"
-supervise_daemon="yes"
-
-respawn_delay="3"
-respawn_max="0"
+respawn_delay=3
+respawn_max=0
+respawn_period=10
 
 depend() {
   need net
-  use dns
-  after firewall
 }
 EOF
 
