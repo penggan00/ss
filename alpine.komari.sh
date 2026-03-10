@@ -286,6 +286,66 @@ install_komari() {
     show_access_info "$password" "$LISTEN_PORT"
 }
 
+# 升级函数
+upgrade_komari() {
+    log_step "开始升级 Komari..."
+    
+    if ! is_installed; then
+        log_error "Komari 未安装，请先安装"
+        return 1
+    fi
+    
+    # 检测架构
+    local arch=$(detect_arch)
+    local file_name="komari-linux-${arch}"
+    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+    
+    # 停止服务
+    log_step "停止 Komari 服务..."
+    rc-service "$SERVICE_NAME" stop 2>/dev/null
+    
+    # 备份当前二进制文件
+    local backup_file="${BINARY_PATH}.backup.$(date +%Y%m%d_%H%M%S)"
+    log_step "备份当前版本到 $backup_file"
+    cp "$BINARY_PATH" "$backup_file"
+    
+    # 下载新版本
+    log_step "下载最新版本..."
+    log_info "URL: $download_url"
+    
+    if ! curl -L -o "$BINARY_PATH" "$download_url"; then
+        log_error "下载失败，正在从备份恢复"
+        mv "$backup_file" "$BINARY_PATH"
+        rc-service "$SERVICE_NAME" start
+        return 1
+    fi
+    
+    chmod +x "$BINARY_PATH"
+    
+    # 启动服务
+    log_step "启动升级后的服务..."
+    rc-service "$SERVICE_NAME" start
+    
+    # 检查服务状态
+    sleep 3
+    if rc-service "$SERVICE_NAME" status >/dev/null 2>&1; then
+        log_success "Komari 升级成功"
+        
+        # 获取新密码（如果生成了新密码）
+        local password=$(get_initial_password)
+        if [ -n "$password" ]; then
+            echo
+            log_info "新生成的初始密码（如果存在）: $password"
+            log_info "请妥善保管"
+        fi
+    else
+        log_error "服务启动失败，正在从备份恢复"
+        cp "$backup_file" "$BINARY_PATH"
+        rc-service "$SERVICE_NAME" start
+        return 1
+    fi
+}
+
 # 卸载函数
 uninstall_komari() {
     log_step "卸载 Komari..."
@@ -312,6 +372,7 @@ uninstall_komari() {
     # 删除文件
     rm -f "$BINARY_PATH"
     rm -f "$RUN_SCRIPT"
+    rm -f "/opt/komari/.initialized"
     
     # 尝试删除目录（如果为空）
     rmdir "$INSTALL_DIR" 2>/dev/null || log_info "目录 $INSTALL_DIR 不为空，保留"
@@ -371,24 +432,26 @@ main_menu() {
     
     echo "请选择操作："
     echo "  1) 安装 Komari"
-    echo "  2) 卸载 Komari"
-    echo "  3) 查看状态"
-    echo "  4) 查看日志"
-    echo "  5) 重启服务"
-    echo "  6) 停止服务"
-    echo "  7) 退出"
+    echo "  2) 升级 Komari"
+    echo "  3) 卸载 Komari"
+    echo "  4) 查看状态"
+    echo "  5) 查看日志"
+    echo "  6) 重启服务"
+    echo "  7) 停止服务"
+    echo "  8) 退出"
     echo
     
-    read -p "输入选项 [1-7]: " choice
+    read -p "输入选项 [1-8]: " choice
     
     case $choice in
         1) install_komari ;;
-        2) uninstall_komari ;;
-        3) show_status ;;
-        4) show_logs ;;
-        5) restart_service ;;
-        6) stop_service ;;
-        7) exit 0 ;;
+        2) upgrade_komari ;;
+        3) uninstall_komari ;;
+        4) show_status ;;
+        5) show_logs ;;
+        6) restart_service ;;
+        7) stop_service ;;
+        8) exit 0 ;;
         *) log_error "无效选项" ;;
     esac
 }
