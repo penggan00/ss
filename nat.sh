@@ -13,7 +13,7 @@ NC='\033[0m'
 CONFIG_FILE="/etc/transit-proxy/config.conf"
 # 默认值
 DEFAULT_TRANSIT_PORT=51300
-DEFAULT_LANDING_PORT=51301
+DEFAULT_LANDING_PORT=51200
 
 ### ====== 显示帮助 ======
 show_help() {
@@ -28,7 +28,7 @@ ${GREEN}中转服务器配置脚本${NC}
   -6 <IP>        设置 IPv6 地址
   -p <端口列表>   设置开放端口（用逗号分隔，如: 80,443,222）
   -t <端口>       设置中转端口（默认: 51300）
-  -l <端口>       设置落地端口（默认: 51301）
+  -l <端口>       设置落地端口（默认: 51200）
   -s              显示当前配置
   -d              删除所有规则
   -h              显示此帮助
