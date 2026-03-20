@@ -294,7 +294,7 @@ install_dependencies() {
         "debian")
             local to_install=""
             command -v iptables >/dev/null 2>&1 || to_install="$to_install iptables"
-            command -v nc >/dev/null 2>&1 || to_install="$to_install netcat"
+            command -v nc >/dev/null 2>&1 || to_install="$to_install netcat-openbsd"
             command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || to_install="$to_install curl"
             
             # iptables-persistent 检查
