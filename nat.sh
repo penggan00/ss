@@ -337,6 +337,43 @@ setup_rules() {
     # 清理旧规则（避免重复）
     echo -e "${BLUE}  清理旧规则...${NC}"
     
+    # ====== 新增：设置默认策略为DROP ======
+    echo -e "${YELLOW}  设置默认策略为 DROP（只开放指定端口）...${NC}"
+    
+    # IPv4 默认策略
+    iptables -P INPUT DROP
+    iptables -P FORWARD DROP
+    # OUTPUT 保持 ACCEPT 通常没问题
+    # iptables -P OUTPUT ACCEPT
+    
+    # IPv6 默认策略（如果设置了IPv6）
+    if [ -n "$LANDING_IPV6" ]; then
+        ip6tables -P INPUT DROP
+        ip6tables -P FORWARD DROP
+        # ip6tables -P OUTPUT ACCEPT
+    fi
+    
+    # ====== 新增：允许已建立的连接 ======
+    echo -e "${BLUE}  允许已建立的连接...${NC}"
+    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    if [ -n "$LANDING_IPV6" ]; then
+        ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+    fi
+    
+    # ====== 新增：允许本地回环接口 ======
+    echo -e "${BLUE}  允许本地回环接口...${NC}"
+    iptables -A INPUT -i lo -j ACCEPT
+    if [ -n "$LANDING_IPV6" ]; then
+        ip6tables -A INPUT -i lo -j ACCEPT
+    fi
+    
+    # ====== 新增：允许ICMP（ping）便于诊断 ======
+    echo -e "${BLUE}  允许ICMP...${NC}"
+    iptables -A INPUT -p icmp -j ACCEPT
+    if [ -n "$LANDING_IPV6" ]; then
+        ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
+    fi
+    
     # 开放端口（先删除可能存在的旧规则）
     echo -e "${BLUE}  设置开放端口...${NC}"
     for port in "${OPEN_PORTS[@]}"; do
@@ -410,6 +447,13 @@ setup_rules() {
         ip6tables -A FORWARD -p udp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j ACCEPT
         ip6tables -A FORWARD -p udp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT
     fi
+    
+    # ====== 新增：记录被拒绝的访问（可选） ======
+    # 记录其他被DROP的包（用于调试）
+    # iptables -A INPUT -j LOG --log-prefix "IPTables-Dropped: " --log-level 4
+    # if [ -n "$LANDING_IPV6" ]; then
+    #     ip6tables -A INPUT -j LOG --log-prefix "IP6Tables-Dropped: " --log-level 4
+    # fi
     
     echo -e "${GREEN}>>>${NC} 规则设置完成"
 }

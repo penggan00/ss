@@ -26,6 +26,25 @@ DOMAIN=""
 CERT_FILE=""
 KEY_FILE=""
 
+# 1. 删除当前失效的软链接
+rm -f /etc/nginx/ssl/certs/default.crt
+rm -f /etc/nginx/ssl/private/default.key
+
+# 2. 创建指向真实文件的新软链接
+ln -s /etc/nginx/ssl/certs/215155.xyz/fullchain.pem /etc/nginx/ssl/certs/default.crt
+ln -s /etc/nginx/ssl/private/215155.xyz/key.pem /etc/nginx/ssl/private/default.key
+
+# 3. （可选）也创建通配符软链接，方便以后使用
+ln -sf /etc/nginx/ssl/certs/215155.xyz/fullchain.pem /etc/nginx/ssl/certs/wildcard.crt
+ln -sf /etc/nginx/ssl/private/215155.xyz/key.pem /etc/nginx/ssl/private/wildcard.key
+
+# 6. 最后，验证 443 端口是否开始监听
+ss -tlnp | grep :443
+cat > /etc/apk/repositories << 'EOF'
+https://dl-cdn.alpinelinux.org/alpine/latest-stable/main
+https://dl-cdn.alpinelinux.org/alpine/latest-stable/community
+EOF
+
 # ---------- 辅助函数 ----------
 # 站点名规范化（移除 .conf 后缀）
 normalize_site_name() {
@@ -44,6 +63,7 @@ install_deps() {
     apk update
     apk add --no-cache nginx openssl curl
 }
+
 
 init_check() {
     if [ "$EUID" -ne 0 ]; then
@@ -643,7 +663,9 @@ EOF
     echo "6. 启动 Nginx 服务..."
     if command -v rc-service &>/dev/null; then
         rc-update add nginx default 2>/dev/null || true
+        etc/init.d/nginx start
         rc-service nginx start
+
     else
         nginx
     fi
