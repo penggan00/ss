@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ================= 一键SSL证书申请脚本 =================
-# 用法：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)" 邮箱 域名 API_Token
-# 示例：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)" admin@example.com example.com your_cf_token
+# 用法：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/ssl.sh)" 邮箱 域名 API_Token
+# 示例：bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/ssl.sh)" admin@example.com example.com your_cf_token
 # ======================================================
 
 # 配置
@@ -22,7 +22,7 @@ show_help() {
     echo -e "${YELLOW}一键SSL证书申请脚本${NC}"
     echo ""
     echo "用法："
-    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" [选项]"
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/ssl.sh)\" [选项]"
     echo ""
     echo "选项："
     echo "  -e, --email    邮箱地址 (用于证书通知)"
@@ -31,8 +31,8 @@ show_help() {
     echo "  -h, --help     显示帮助信息"
     echo ""
     echo "示例："
-    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" -e admin@example.com -d example.com -t your_token"
-    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/https.sh)\" --email admin@example.com --domain example.com --token your_token"
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/ssl.sh)\" -e admin@example.com -d example.com -t your_token"
+    echo "  bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/penggan00/rss/main/ssl.sh)\" --email admin@example.com --domain example.com --token your_token"
     echo ""
     echo "注意："
     echo "  1. Cloudflare API Token 需要 DNS 编辑权限"
@@ -194,8 +194,9 @@ install_acme() {
     # ==================== 设置自动续期 ====================
     echo -e "${YELLOW}>>> 设置自动续期...${NC}"
     
-    # 创建续期脚本
-    cat > "/opt/cert-manager/renew-all.sh" << 'EOF'
+
+# 创建续期脚本
+cat > "/opt/cert-manager/renew-all.sh" << 'EOF'
 #!/bin/bash
 
 # 设置日志文件
@@ -226,12 +227,41 @@ if [ -f "/opt/cert-manager/config/domains.list" ]; then
                 if [ $RENEW_RESULT -eq 0 ]; then
                     echo "✅ $DOMAIN 证书续期成功" >> "$LOG_FILE"
                     
-                    # 重新安装证书到 Nginx
                     ./acme.sh --install-cert -d "$DOMAIN" \
                         --key-file "/etc/nginx/ssl/private/$DOMAIN/key.pem" \
                         --fullchain-file "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" \
                         --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || rc-service nginx restart 2>/dev/null" \
-                        --force 2>&1 >> "$LOG_FILE"                   
+                        --force 2>&1 >> "$LOG_FILE"
+
+                    # ========== Alpine 权限修复 ==========
+                    echo "🔧 修复证书权限..." >> "$LOG_FILE"
+
+                    # 设置文件权限
+                    chmod 644 "/etc/nginx/ssl/certs/$DOMAIN"/*.pem 2>/dev/null || true
+                    chmod 600 "/etc/nginx/ssl/private/$DOMAIN/key.pem" 2>/dev/null || true
+
+                    # 设置目录权限
+                    chmod 755 "/etc/nginx/ssl/certs/$DOMAIN" 2>/dev/null || true
+                    chmod 755 "/etc/nginx/ssl/private/$DOMAIN" 2>/dev/null || true
+
+                    # Alpine 特定：设置为 nginx 用户
+                    if [ -f /etc/alpine-release ]; then
+                        # 确保 nginx 用户存在
+                        id nginx &>/dev/null || adduser -D -H -s /sbin/nologin nginx
+                        chown -R root:nginx "/etc/nginx/ssl" 2>/dev/null || true
+                        chmod 750 "/etc/nginx/ssl/private" 2>/dev/null || true
+                        chmod 640 "/etc/nginx/ssl/private/$DOMAIN/key.pem" 2>/dev/null || true
+                        echo "Alpine: 设置所有者 root:nginx" >> "$LOG_FILE"
+                    else
+                        # 其他系统
+                        if id "www-data" &>/dev/null 2>&1; then
+                            chown -R root:www-data "/etc/nginx/ssl" 2>/dev/null || true
+                        elif id "nginx" &>/dev/null 2>&1; then
+                            chown -R root:nginx "/etc/nginx/ssl" 2>/dev/null || true
+                        fi
+                    fi
+
+                    echo "✅ 证书权限修复完成" >> "$LOG_FILE"
                     
                 else
                     echo "⚠️  $DOMAIN 证书尚未需要续期" >> "$LOG_FILE"
@@ -368,11 +398,48 @@ install_certificate() {
         --ca-file "/etc/nginx/ssl/certs/$DOMAIN/ca.pem" \
         --reloadcmd "systemctl reload nginx 2>/dev/null || nginx -s reload 2>/dev/null || rc-service nginx restart 2>/dev/null || true"
     
-    # 设置权限
+    # 设置文件权限
     chmod 644 "/etc/nginx/ssl/certs/$DOMAIN"/*.pem
     chmod 600 "/etc/nginx/ssl/private/$DOMAIN/key.pem"
     
-    # 创建符号链接
+    # 设置目录权限
+    chmod 755 "/etc/nginx/ssl/certs/$DOMAIN"
+    chmod 755 "/etc/nginx/ssl/private/$DOMAIN"
+    chmod 755 "/etc/nginx/ssl/certs"
+    chmod 755 "/etc/nginx/ssl/private"
+    
+    # ========== Alpine 特定权限设置 ==========
+    # 对于 Alpine，nginx worker 进程以 nginx 用户运行
+    if [ "$OS" = "alpine" ]; then
+        echo -e "${YELLOW}检测到 Alpine 系统，设置 nginx 用户权限...${NC}"
+        
+        # 确保 nginx 用户存在
+        if ! id "nginx" &>/dev/null 2>&1; then
+            adduser -D -H -s /sbin/nologin nginx
+        fi
+        
+        # 设置所有者为 root:nginx
+        chown -R root:nginx "/etc/nginx/ssl"
+        
+        # 确保 worker 进程可以读取证书文件
+        # 目录需要 rx 权限，文件需要 r 权限
+        chmod 750 "/etc/nginx/ssl/private"
+        chmod 640 "/etc/nginx/ssl/private/$DOMAIN/key.pem"
+        
+        echo -e "${GREEN}✅ Alpine 权限设置完成 (root:nginx)${NC}"
+        
+    else
+        # Debian/Ubuntu/CentOS 等其他系统
+        if id "www-data" &>/dev/null 2>&1; then
+            chown -R root:www-data "/etc/nginx/ssl"
+            echo -e "${GREEN}设置所有者: root:www-data${NC}"
+        elif id "nginx" &>/dev/null 2>&1; then
+            chown -R root:nginx "/etc/nginx/ssl"
+            echo -e "${GREEN}设置所有者: root:nginx${NC}"
+        fi
+    fi
+    
+    # 创建符号链接（保持不变）
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/$DOMAIN.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/$DOMAIN.key"
     
@@ -386,26 +453,24 @@ install_certificate() {
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/pki/tls/certs/$DOMAIN.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/pki/tls/private/$DOMAIN.key"
     
-    # ==================== 添加：Nginx 管理脚本需要的软链接 ====================
+    # 创建 Nginx 标准软链接
     echo -e "${GREEN}>>> 创建 Nginx 标准软链接...${NC}"
     
-    # 1. 创建标准软链接（Nginx 管理脚本会查找这些）
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/default.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/default.key"
     
-    # 2. 创建通配符证书软链接
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/wildcard.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/wildcard.key"
     
-    # 3. 创建域名简写软链接
     ln -sf "/etc/nginx/ssl/certs/$DOMAIN/fullchain.pem" "/etc/nginx/ssl/certs/$DOMAIN.crt"
     ln -sf "/etc/nginx/ssl/private/$DOMAIN/key.pem" "/etc/nginx/ssl/private/$DOMAIN.key"
     
-    # 4. 创建证书信息文件
+    # 创建证书信息文件
     create_cert_info_file
     
     echo -e "${GREEN}>>> 证书安装完成${NC}"
 }
+
 # 创建证书信息文件（供 Nginx 管理脚本读取）
 create_cert_info_file() {
     local cert_info="/etc/nginx/ssl/cert-info.conf"
@@ -514,12 +579,21 @@ configure_nginx() {
             -keyout "/etc/nginx/ssl/fallback.key" \
             -out "/etc/nginx/ssl/fallback.crt" \
             -subj "/CN=Invalid" 2>/dev/null
+        chmod 600 "/etc/nginx/ssl/fallback.key"
+        chmod 644 "/etc/nginx/ssl/fallback.crt"
     fi
     
     # 创建主配置文件（如果不存在）
     if [ ! -f /etc/nginx/nginx.conf ]; then
-        cat > /etc/nginx/nginx.conf <<'EOF'
-user www-data;
+        # 根据系统设置正确的用户
+        if [ "$OS" = "alpine" ]; then
+            NGINX_USER="nginx"
+        else
+            NGINX_USER="www-data"
+        fi
+        
+        cat > /etc/nginx/nginx.conf <<EOF
+user $NGINX_USER;
 worker_processes auto;
 pid /run/nginx.pid;
 
@@ -552,25 +626,36 @@ http {
     }
 }
 EOF
+        echo -e "${GREEN}✅ 创建 nginx.conf (用户: $NGINX_USER)${NC}"
+    fi
+    
+    # 验证配置
+    echo -e "${YELLOW}>>> 验证 Nginx 配置...${NC}"
+    if nginx -t 2>&1; then
+        echo -e "${GREEN}✅ Nginx 配置验证通过${NC}"
+    else
+        echo -e "${RED}❌ Nginx 配置验证失败${NC}"
+        exit 1
     fi
     
     # 启动或重启 Nginx
-    detect_os
+    if [ "$OS" = "alpine" ]; then
+        rc-service nginx restart
+    else
+        systemctl restart nginx 2>/dev/null || nginx -s reload 2>/dev/null || nginx
+    fi
     
-    case $OS in
-        debian|ubuntu|centos|rhel|fedora)
-            systemctl restart nginx 2>/dev/null || nginx -s reload 2>/dev/null || nginx
-            ;;
-        alpine)
-            rc-service nginx restart 2>/dev/null || nginx -s reload 2>/dev/null || nginx
-            ;;
-        *)
-            nginx -s reload 2>/dev/null || nginx
-            ;;
-    esac
+    # 验证运行状态
+    if pgrep nginx > /dev/null; then
+        echo -e "${GREEN}✅ Nginx 运行正常${NC}"
+    else
+        echo -e "${RED}❌ Nginx 启动失败${NC}"
+        exit 1
+    fi
     
     echo -e "${GREEN}>>> Nginx 配置完成${NC}"
 }
+
 
 # 显示成功信息
 show_success() {

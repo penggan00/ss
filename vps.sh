@@ -68,7 +68,6 @@ if [ "$OS_TYPE" = "alpine" ]; then
         rc-service sshd restart 2>/dev/null || true
         rc-update add sshd default 2>/dev/null || true
     fi
-    
     rc-service sshd restart 2>/dev/null || true
     
     # 验证配置
@@ -82,7 +81,11 @@ if [ "$OS_TYPE" = "alpine" ]; then
     
     # 添加docker-compose别名
     echo "alias docker-compose='docker compose'" >> ~/.bashrc
-
+    # 安装BBR（可选）
+    echo "正在安装BBR加速..."
+    wget --no-check-certificate -O /opt/bbr.sh https://github.com/teddysun/across/raw/master/bbr.sh
+    chmod +x /opt/bbr.sh
+    /opt/bbr.sh
     
 # Debian/Ubuntu 配置
 elif [ "$OS_TYPE" = "debian" ]; then
@@ -113,6 +116,7 @@ elif [ "$OS_TYPE" = "debian" ]; then
     
     # 添加docker-compose别名
     echo "alias docker-compose='docker compose'" >> ~/.bashrc && source ~/.bashrc
+
     # 继续执行其他安装任务
     echo "开始安装常用工具..."
     apt update -y
@@ -126,6 +130,12 @@ elif [ "$OS_TYPE" = "debian" ]; then
     timedatectl set-ntp true && \
     echo "✅ 时区设置完成" && \
     timedatectl status
+
+    # 安装BBR（可选）
+    echo "正在安装BBR加速..."
+    wget --no-check-certificate -O /opt/bbr.sh https://github.com/teddysun/across/raw/master/bbr.sh
+    chmod +x /opt/bbr.sh
+    /opt/bbr.sh
 fi
 
 echo ""
