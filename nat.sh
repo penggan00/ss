@@ -11,6 +11,8 @@ NC='\033[0m'
 ### ====== 配置参数（可自定义） ======
 # 配置文件路径
 CONFIG_FILE="/etc/transit-proxy/config.conf"
+# 白名单配置文件
+WHITELIST_FILE="/etc/transit-proxy/whitelist.conf"
 # 默认值
 DEFAULT_TRANSIT_PORT=51300
 DEFAULT_LANDING_PORT=51200
@@ -27,6 +29,7 @@ ${GREEN}中转服务器配置脚本${NC}
   -4 <IP>        设置 IPv4 地址
   -6 <IP>        设置 IPv6 地址
   -p <端口列表>   设置开放端口（用逗号分隔，如: 80,443,222）
+  -w <IP列表>     设置白名单IP（用逗号分隔，这些IP可以访问所有端口）
   -t <端口>       设置中转端口（默认: 51300）
   -l <端口>       设置落地端口（默认: 51200）
   -s              显示当前配置
@@ -34,9 +37,8 @@ ${GREEN}中转服务器配置脚本${NC}
   -h              显示此帮助
 
 示例:
-  $0 -4 72.18.81.15 -6 2607:f130:0:18e::17dd:18a0 -p 80,443,222
-  $0 -4 72.18.81.15 -p 80,443,222,51200,51201,51300,51301
-  $0 -4 72.18.81.15 -6 2607:f130:0:18e::17dd:18a0 -p 80,443 -t 50000 -l 50001
+  $0 -4 72.18.81.15 -6 2607:f130:0:18e::17dd:18a0 -p 80,443,222 -w 1.2.3.4,5.6.7.8
+  $0 -4 72.18.81.15 -p 80,443,222 -w 1.2.3.4
   $0 -d  # 删除所有规则
 EOF
 }
@@ -47,12 +49,13 @@ parse_args() {
     LANDING_IPV4=""
     LANDING_IPV6=""
     OPEN_PORTS=()
+    WHITELIST_IPS=()
     TRANSIT_PORT=$DEFAULT_TRANSIT_PORT
     LANDING_PORT=$DEFAULT_LANDING_PORT
     SHOW_CONFIG=0
     DELETE_RULES=0
     
-    while getopts "4:6:p:t:l:sdh" opt; do
+    while getopts "4:6:p:w:t:l:sdh" opt; do
         case $opt in
             4)
                 LANDING_IPV4="$OPTARG"
@@ -62,6 +65,9 @@ parse_args() {
                 ;;
             p)
                 IFS=',' read -ra OPEN_PORTS <<< "$OPTARG"
+                ;;
+            w)
+                IFS=',' read -ra WHITELIST_IPS <<< "$OPTARG"
                 ;;
             t)
                 TRANSIT_PORT="$OPTARG"
@@ -104,8 +110,8 @@ parse_args() {
         exit 1
     fi
     
-    if [ ${#OPEN_PORTS[@]} -eq 0 ]; then
-        echo -e "${RED}错误:${NC} 请指定开放端口"
+    if [ ${#OPEN_PORTS[@]} -eq 0 ] && [ ${#WHITELIST_IPS[@]} -eq 0 ]; then
+        echo -e "${RED}错误:${NC} 请指定开放端口或白名单IP"
         show_help
         exit 1
     fi
@@ -116,6 +122,10 @@ load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
         echo -e "${GREEN}>>>${NC} 已加载配置文件: $CONFIG_FILE"
+    fi
+    if [ -f "$WHITELIST_FILE" ]; then
+        source "$WHITELIST_FILE"
+        echo -e "${GREEN}>>>${NC} 已加载白名单: $WHITELIST_FILE"
     fi
 }
 
@@ -143,6 +153,18 @@ TRANSIT_PORT="$TRANSIT_PORT"
 LANDING_PORT="$LANDING_PORT"
 EOF
     echo -e "${GREEN}>>>${NC} 配置已保存到: $CONFIG_FILE"
+    
+    # 保存白名单
+    if [ ${#WHITELIST_IPS[@]} -gt 0 ]; then
+        cat > "$WHITELIST_FILE" << EOF
+# IP白名单配置文件
+# 最后更新: $(date)
+
+# 白名单IP列表（这些IP可以访问所有端口）
+WHITELIST_IPS=(${WHITELIST_IPS[*]})
+EOF
+        echo -e "${GREEN}>>>${NC} 白名单已保存到: $WHITELIST_FILE"
+    fi
 }
 
 show_current_config() {
@@ -152,10 +174,15 @@ show_current_config() {
     echo -e "${BLUE}IPv4 地址:${NC} ${LANDING_IPV4:-未设置}"
     echo -e "${BLUE}IPv6 地址:${NC} ${LANDING_IPV6:-未设置}"
     echo -e "${BLUE}开放端口:${NC} ${OPEN_PORTS[*]:-无}"
+    echo -e "${BLUE}白名单IP:${NC} ${WHITELIST_IPS[*]:-无}"
     echo -e "${BLUE}中转端口:${NC} $TRANSIT_PORT -> $LANDING_PORT"
     
     # 显示当前生效的iptables规则
     echo -e "\n${BLUE}当前生效的规则:${NC}"
+    
+    # 显示白名单规则
+    echo -e "${YELLOW}  白名单IP:${NC}"
+    iptables -L INPUT -n | grep -E "ACCEPT.*all.*--.*[0-9]" | grep -v "state\|lo\|icmp" || echo "    无"
     
     # 显示开放端口规则
     echo -e "${YELLOW}  开放端口:${NC}"
@@ -337,41 +364,57 @@ setup_rules() {
     # 清理旧规则（避免重复）
     echo -e "${BLUE}  清理旧规则...${NC}"
     
-    # ====== 新增：设置默认策略为DROP ======
-    echo -e "${YELLOW}  设置默认策略为 DROP（只开放指定端口）...${NC}"
+    # ====== 设置默认策略为DROP ======
+    echo -e "${YELLOW}  设置默认策略为 DROP（只开放指定端口和白名单IP）...${NC}"
     
     # IPv4 默认策略
     iptables -P INPUT DROP
     iptables -P FORWARD DROP
-    # OUTPUT 保持 ACCEPT 通常没问题
-    # iptables -P OUTPUT ACCEPT
     
     # IPv6 默认策略（如果设置了IPv6）
     if [ -n "$LANDING_IPV6" ]; then
         ip6tables -P INPUT DROP
         ip6tables -P FORWARD DROP
-        # ip6tables -P OUTPUT ACCEPT
     fi
     
-    # ====== 新增：允许已建立的连接 ======
+    # ====== 允许已建立的连接 ======
     echo -e "${BLUE}  允许已建立的连接...${NC}"
     iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     if [ -n "$LANDING_IPV6" ]; then
         ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
     fi
     
-    # ====== 新增：允许本地回环接口 ======
+    # ====== 允许本地回环接口 ======
     echo -e "${BLUE}  允许本地回环接口...${NC}"
     iptables -A INPUT -i lo -j ACCEPT
     if [ -n "$LANDING_IPV6" ]; then
         ip6tables -A INPUT -i lo -j ACCEPT
     fi
     
-    # ====== 新增：允许ICMP（ping）便于诊断 ======
+    # ====== 允许ICMP（ping）便于诊断 ======
     echo -e "${BLUE}  允许ICMP...${NC}"
     iptables -A INPUT -p icmp -j ACCEPT
     if [ -n "$LANDING_IPV6" ]; then
         ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
+    fi
+    
+    # ====== 新增：添加白名单IP（允许访问所有端口） ======
+    if [ ${#WHITELIST_IPS[@]} -gt 0 ]; then
+        echo -e "${BLUE}  添加白名单IP（允许访问所有端口）...${NC}"
+        for ip in "${WHITELIST_IPS[@]}"; do
+            # 验证IP格式
+            if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+                echo -e "    添加 IPv4 白名单: $ip"
+                iptables -I INPUT 1 -s $ip -j ACCEPT
+            elif [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then
+                echo -e "    添加 IPv6 白名单: $ip"
+                if [ -n "$LANDING_IPV6" ]; then
+                    ip6tables -I INPUT 1 -s $ip -j ACCEPT
+                fi
+            else
+                echo -e "${YELLOW}    警告: 跳过无效IP格式: $ip${NC}"
+            fi
+        done
     fi
     
     # 开放端口（先删除可能存在的旧规则）
@@ -448,13 +491,6 @@ setup_rules() {
         ip6tables -A FORWARD -p udp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT
     fi
     
-    # ====== 新增：记录被拒绝的访问（可选） ======
-    # 记录其他被DROP的包（用于调试）
-    # iptables -A INPUT -j LOG --log-prefix "IPTables-Dropped: " --log-level 4
-    # if [ -n "$LANDING_IPV6" ]; then
-    #     ip6tables -A INPUT -j LOG --log-prefix "IP6Tables-Dropped: " --log-level 4
-    # fi
-    
     echo -e "${GREEN}>>>${NC} 规则设置完成"
 }
 
@@ -518,6 +554,7 @@ main() {
         echo -e "${BLUE}IPv6 地址:${NC} $LANDING_IPV6"
     fi
     echo -e "${BLUE}开放端口:${NC} ${OPEN_PORTS[*]}"
+    echo -e "${BLUE}白名单IP:${NC} ${WHITELIST_IPS[*]:-无}"
     echo -e "${BLUE}中转端口:${NC} $TRANSIT_PORT -> $LANDING_PORT"
     echo -e "${GREEN}========================================${NC}"
     
