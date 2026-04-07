@@ -1,4 +1,3 @@
-#CF_KEY="abc123xyz" DOMAIN="*.xyz" SUB="web,api" CF_PROXY=1 CF_TTL=auto sh -c "$(curl -sL https://*.xyz/cf.sh)"
 #!/bin/sh
 set -e
 
@@ -10,36 +9,56 @@ set -e
 PROXY=$( [ "$CF_PROXY" = "1" ] && echo true || echo false )
 TTL=$( [ -z "$CF_TTL" ] || [ "$CF_TTL" = "auto" ]; echo ${CF_TTL:+$CF_TTL} | grep -q "auto" && echo 1 || echo $CF_TTL )
 
-# 获取真实 IP（改进版）
-echo "🌐 获取真实公网 IP..."
-IPV4=""
-IPV6=""
+# ========== 新增：检查是否手动指定了 IP ==========
+MANUAL_IP="$IP"  # 读取环境变量 IP
 
-# IPv4 检测（跳过私有和 WARP）
-for SERVICE in "ipv4.ip.sb" "v4.ident.me" "api.ipify.org"; do
-    TEMP_IP=$(curl -s --connect-timeout 3 -4 "$SERVICE" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
-    if [ -n "$TEMP_IP" ] && ! echo "$TEMP_IP" | grep -qE '^(100\.|172\.16\.|10\.|192\.168\.)'; then
-        IPV4="$TEMP_IP"
-        echo "  ✅ IPv4: $IPV4"
-        break
-    fi
-done
-
-if [ -z "$IPV4" ]; then
-    # IPv6 检测（跳过私有）
-    IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
-    if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
-        echo "  ✅ IPv6: $IPV6"
+if [ -n "$MANUAL_IP" ]; then
+    # 用户手动指定了 IP，直接使用
+    echo "📝 使用手动指定的 IP: $MANUAL_IP"
+    IP="$MANUAL_IP"
+    
+    # 自动判断是 IPv4 还是 IPv6
+    if echo "$IP" | grep -q ':'; then
+        TYPE="AAAA"
+        IP_VER="IPv6"
     else
-        echo "  ❌ 无法获取公网 IP"
-        exit 1
+        TYPE="A"
+        IP_VER="IPv4"
     fi
-fi
+    echo "✅ 已设置为 $IP_VER 记录 ($TYPE)"
+else
+    # ========== 原有的自动获取 IP 逻辑 ==========
+    echo "🌐 获取真实公网 IP..."
+    IPV4=""
+    IPV6=""
 
-IP="${IPV4:-$IPV6}"
-TYPE="A"
-[ -z "$IPV4" ] && TYPE="AAAA"
-echo "📝 使用 ${TYPE}: $IP"
+    # IPv4 检测（跳过私有和 WARP）
+    for SERVICE in "ipv4.ip.sb" "v4.ident.me" "api.ipify.org"; do
+        TEMP_IP=$(curl -s --connect-timeout 3 -4 "$SERVICE" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
+        if [ -n "$TEMP_IP" ] && ! echo "$TEMP_IP" | grep -qE '^(100\.|172\.16\.|10\.|192\.168\.)'; then
+            IPV4="$TEMP_IP"
+            echo "  ✅ IPv4: $IPV4"
+            break
+        fi
+    done
+
+    if [ -z "$IPV4" ]; then
+        # IPv6 检测（跳过私有）
+        IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
+        if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
+            echo "  ✅ IPv6: $IPV6"
+        else
+            echo "  ❌ 无法获取公网 IP"
+            exit 1
+        fi
+    fi
+
+    IP="${IPV4:-$IPV6}"
+    TYPE="A"
+    [ -z "$IPV4" ] && TYPE="AAAA"
+    echo "📝 使用自动获取的 ${TYPE}: $IP"
+fi
+# ========== 自动获取 IP 逻辑结束 ==========
 
 # 获取 Zone ID（只获取一次）
 get_zone_id() {
