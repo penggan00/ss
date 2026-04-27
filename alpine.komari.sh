@@ -91,6 +91,7 @@ create_run_script() {
     
     cat > "$RUN_SCRIPT" << EOF
 #!/bin/sh
+export TZ=Asia/Shanghai
 # Komari 自动重启脚本
 # 第一次运行，记录密码到日志
 if [ ! -f /opt/komari/.initialized ]; then
