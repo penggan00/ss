@@ -121,8 +121,8 @@ elif [ "$OS_TYPE" = "debian" ]; then
     echo "开始安装常用工具..."
     apt update -y
     apt upgrade -y
-    apt install -y curl fail2ban wget nano htop ufw git
-
+    apt install -y curl wget nano htop ufw git fail2ban
+    
     # 设置时区
     apt-get update && apt-get install -y systemd-timesyncd
     timedatectl set-timezone Asia/Singapore && \
