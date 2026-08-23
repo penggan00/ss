@@ -169,10 +169,10 @@ fi
 
 if [[ -z "$ZONE_ID" ]]; then
     echo "⚠️  未指定 Zone ID，尝试通过 API 自动获取..."
-    ZONE_ID=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
+    ZONE_RESPONSE=$(curl -s -X GET "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
         -H "Authorization: Bearer $CF_TOKEN" \
-        -H "Content-Type: application/json" | \
-        awk -F'"' '/"id"/ {print $4; exit}')
+        -H "Content-Type: application/json")
+    ZONE_ID=$(echo "$ZONE_RESPONSE" | awk -F'"id":"' '{print $2}' | awk -F'"' '{print $1}' | head -1)
     if [[ -z "$ZONE_ID" ]]; then
         echo "❌ 无法自动获取 Zone ID，请通过 -z 参数或环境变量 CF_ZONE_ID 指定"
         exit 1
