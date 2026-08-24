@@ -789,9 +789,6 @@ server {
 
     ssl_protocols TLSv1.2 TLSv1.3;
 
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 10m;
-
     location / {
 
         proxy_pass http://127.0.0.1:$PORT;
