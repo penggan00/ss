@@ -14,9 +14,6 @@
 #
 # bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)" \
 # _ \
-# -e "penggan0@qq.com" \
-# -d "215155.xyz" \
-# -t "CF_API_TOKEN"
 #
 # -e 邮箱，可选
 # -d Cloudflare 主域名
@@ -135,8 +132,8 @@ Nginx SSL Manager $VERSION
 
 bash -c "\$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)" \\
 _ \\
--e "penggan0@qq.com" \\
--d "215155.xyz" \\
+-e "www@qq.com" \\
+-d ".com" \\
 -t "CF_API_TOKEN"
 
 参数：
