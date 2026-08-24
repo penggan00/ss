@@ -4,7 +4,7 @@ set -e
 if [ $# -eq 0 ]; then
     echo "❌ 错误：请提供 SSH 公钥作为参数"
     echo ""
-    echo '用法：'
+    echo "用法："
     echo 'bash <(curl -sL https://raw.githubusercontent.com/penggan00/ss/main/vps.sh) "公钥内容"'
     exit 1
 fi
@@ -133,7 +133,8 @@ clean_ssh_config() {
 
     rm -f /etc/ssh/sshd_config.d/99-custom.conf
 
-    echo "✅ 冲突配置已清理"
+    echo "✅ 主配置文件中的冲突配置已清理"
+    echo "✅ 旧自定义配置已清理"
 }
 
 write_ssh_config() {
@@ -154,7 +155,8 @@ EOF
 
     chmod 644 /etc/ssh/sshd_config.d/99-custom.conf
 
-    echo "✅ SSH 配置已写入"
+    echo "✅ SSH 配置已写入："
+    echo "/etc/ssh/sshd_config.d/99-custom.conf"
 }
 
 check_ssh_syntax() {
@@ -183,16 +185,14 @@ check_effective_ssh_config() {
     echo ""
     echo "当前实际配置："
 
-    echo "$EFFECTIVE_CONFIG" | grep -E '^(port|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|permitrootlogin|authorizedkeysfile)[[:space:]]'
+    echo "$EFFECTIVE_CONFIG" | grep -E '^(port|permitrootlogin|pubkeyauthentication|passwordauthentication|kbdinteractiveauthentication|challengeresponseauthentication|authorizedkeysfile)[[:space:]]'
 
-    PORT_COUNT="$(echo "$EFFECTIVE_CONFIG" | grep -Ec '^port[[:space:]]+222$' || true)"
-
-    if [ "$PORT_COUNT" -ne 1 ]; then
-        echo "❌ SSH 222 端口配置异常，检测到 $PORT_COUNT 个"
+    if echo "$EFFECTIVE_CONFIG" | grep -Eq '^port[[:space:]]+222$'; then
+        echo "✅ SSH 端口：222"
+    else
+        echo "❌ SSH 端口不是 222"
         exit 1
     fi
-
-    echo "✅ SSH 端口：222"
 
     if echo "$EFFECTIVE_CONFIG" | grep -Eq '^pubkeyauthentication[[:space:]]+yes$'; then
         echo "✅ 公钥认证：开启"
