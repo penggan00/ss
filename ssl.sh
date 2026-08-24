@@ -1,29 +1,29 @@
-#!/bin/sh
+#!/bin/bash
 
 # ============================================================
 # Nginx SSL 懒人管理器
 #
-# 直接运行：
+# Alpine Linux / Debian
+# Cloudflare DNS-01
+# Let's Encrypt
+# Nginx Reverse Proxy
+# 自动续签
+#
+# 使用：
 #
 # bash -c "$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)" \
-# -e "penggan0@qq.com" \
+# _ -e "penggan0@qq.com" \
 # -d "215155.xyz" \
 # -t "CF_API_TOKEN"
 #
 # -e 邮箱，可选
 # -d Cloudflare 主域名
 # -t Cloudflare API Token
-#
-# Alpine / Debian
-# Cloudflare DNS-01
-# Let's Encrypt
-# Nginx reverse proxy
-# 自动续签
 # ============================================================
 
 set -u
 
-VERSION="2.0.0"
+VERSION="3.0.0"
 NAME="nginx-ssl-manager"
 
 BASE_DIR="/etc/nginx-ssl-manager"
@@ -31,6 +31,7 @@ CONFIG_FILE="${BASE_DIR}/config"
 LOG_FILE="${BASE_DIR}/manager.log"
 SITES_DIR="${BASE_DIR}/sites"
 BACKUP_DIR="${BASE_DIR}/backup"
+CERTS_DIR="${BASE_DIR}/certs"
 
 DOMAIN=""
 EMAIL=""
@@ -38,9 +39,8 @@ CF_TOKEN=""
 
 OS=""
 ARCH=""
-ACME_HOME="/root/.acme.sh"
 
-WEB_ROOT="/var/www"
+ACME_HOME="/root/.acme.sh"
 
 NGINX_AVAILABLE=""
 NGINX_ENABLED=""
@@ -56,19 +56,19 @@ RESET="$(printf '\033[0m')"
 # ============================================================
 
 ok() {
-    printf "%s✓ %s%s\n" "$GREEN" "$1" "$RESET"
+    printf '%s✓ %s%s\n' "$GREEN" "$1" "$RESET"
 }
 
 info() {
-    printf "%s→ %s%s\n" "$CYAN" "$1" "$RESET"
+    printf '%s→ %s%s\n' "$CYAN" "$1" "$RESET"
 }
 
 warn() {
-    printf "%s⚠ %s%s\n" "$YELLOW" "$1" "$RESET"
+    printf '%s⚠ %s%s\n' "$YELLOW" "$1" "$RESET"
 }
 
 err() {
-    printf "%s✗ %s%s\n" "$RED" "$1" "$RESET"
+    printf '%s✗ %s%s\n' "$RED" "$1" "$RESET"
 }
 
 die() {
@@ -77,15 +77,27 @@ die() {
 }
 
 pause() {
-    printf "\n按 Enter 返回..."
-    read dummy
+    printf '\n按 Enter 返回...'
+    read -r dummy
 }
 
 log() {
     mkdir -p "$BASE_DIR" 2>/dev/null || true
+
     printf '[%s] %s\n' \
         "$(date '+%Y-%m-%d %H:%M:%S')" \
         "$1" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+# ============================================================
+# 检查 Bash
+# ============================================================
+
+check_bash() {
+
+    if [ -z "${BASH_VERSION:-}" ]; then
+        die "此脚本需要 Bash，请使用 bash 执行。"
+    fi
 }
 
 # ============================================================
@@ -100,46 +112,40 @@ check_root() {
 }
 
 # ============================================================
-# 兼容：
-#
-# bash -c "script" -e email -d domain -t token
-#
-# bash -c 的第一个参数实际上会成为 $0
-# 所以这里把 $0 重新放回参数列表。
-# ============================================================
-
-if [ "${0:-}" = "-e" ]; then
-    set -- "$0" "$@"
-fi
-
-# ============================================================
 # 参数
+#
+# bash -c "script" _ -e email -d domain -t token
+#
+# 第一个 _ 是 $0
+# 后面的才是 $@
 # ============================================================
 
-while getopts "e:d:t:h" opt; do
+parse_args() {
 
-    case "$opt" in
+    while getopts ":e:d:t:h" opt; do
 
-        e)
-            EMAIL="$OPTARG"
-            ;;
+        case "$opt" in
 
-        d)
-            DOMAIN="$OPTARG"
-            ;;
+            e)
+                EMAIL="$OPTARG"
+                ;;
 
-        t)
-            CF_TOKEN="$OPTARG"
-            ;;
+            d)
+                DOMAIN="$OPTARG"
+                ;;
 
-        h)
-            cat <<EOF
+            t)
+                CF_TOKEN="$OPTARG"
+                ;;
+
+            h)
+                cat <<EOF
 
 Nginx SSL Manager ${VERSION}
 
 用法：
 
-bash -c "\$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)" \\
+bash -c "\$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.sh)" _ \\
 -e "penggan0@qq.com" \\
 -d "215155.xyz" \\
 -t "CF_API_TOKEN"
@@ -151,34 +157,46 @@ bash -c "\$(curl -fsSL https://raw.githubusercontent.com/penggan00/ss/main/ssl.s
 -t    Cloudflare API Token
 
 EOF
-            exit 0
+                exit 0
+                ;;
+
+            \?)
+                die "未知参数：-$OPTARG"
+                ;;
+
+            :)
+                die "参数 -$OPTARG 缺少值。"
+                ;;
+
+        esac
+
+    done
+
+    if [ -z "$DOMAIN" ]; then
+        die "缺少 -d 主域名。"
+    fi
+
+    if [ -z "$CF_TOKEN" ]; then
+        die "缺少 -t Cloudflare API Token。"
+    fi
+
+    DOMAIN="${DOMAIN#http://}"
+    DOMAIN="${DOMAIN#https://}"
+    DOMAIN="${DOMAIN%%/*}"
+    DOMAIN="${DOMAIN#.}"
+    DOMAIN="${DOMAIN%.}"
+
+    case "$DOMAIN" in
+
+        *.*)
             ;;
 
         *)
-            exit 1
+            die "主域名格式不正确：$DOMAIN"
             ;;
 
     esac
-
-done
-
-# ============================================================
-# 参数检查
-# ============================================================
-
-[ -z "$DOMAIN" ] && die "缺少 -d 主域名。"
-[ -z "$CF_TOKEN" ] && die "缺少 -t Cloudflare API Token。"
-
-DOMAIN="${DOMAIN%/}"
-DOMAIN="${DOMAIN#.}"
-
-case "$DOMAIN" in
-    *.*)
-        ;;
-    *)
-        die "主域名格式不正确：$DOMAIN"
-        ;;
-esac
+}
 
 # ============================================================
 # 检测系统
@@ -224,15 +242,18 @@ init_dirs() {
     mkdir -p "$BASE_DIR"
     mkdir -p "$SITES_DIR"
     mkdir -p "$BACKUP_DIR"
+    mkdir -p "$CERTS_DIR"
 
     touch "$LOG_FILE"
 
     chmod 700 "$BASE_DIR"
+    chmod 700 "$SITES_DIR"
+    chmod 700 "$CERTS_DIR"
     chmod 600 "$LOG_FILE"
 }
 
 # ============================================================
-# 保存配置
+# 保存总配置
 # ============================================================
 
 save_config() {
@@ -250,19 +271,6 @@ EOF
 }
 
 # ============================================================
-# 加载配置
-# ============================================================
-
-load_config() {
-
-    if [ ! -f "$CONFIG_FILE" ]; then
-        die "配置文件不存在。"
-    fi
-
-    . "$CONFIG_FILE"
-}
-
-# ============================================================
 # 系统依赖
 # ============================================================
 
@@ -272,17 +280,17 @@ install_dependencies() {
 
     if [ "$OS" = "alpine" ]; then
 
-        apk update >/dev/null 2>&1 \
-            || die "apk update 失败。"
+        apk update >/dev/null 2>&1 || \
+            die "apk update 失败。"
 
-        for pkg in curl openssl ca-certificates bind-tools; do
+        for pkg in curl openssl ca-certificates bind-tools bash; do
 
             if ! apk info -e "$pkg" >/dev/null 2>&1; then
 
                 info "安装 $pkg ..."
 
-                apk add --no-cache "$pkg" >/dev/null 2>&1 \
-                    || die "安装 $pkg 失败。"
+                apk add --no-cache "$pkg" >/dev/null 2>&1 || \
+                    die "安装 $pkg 失败。"
 
             fi
 
@@ -294,17 +302,17 @@ install_dependencies() {
 
         export DEBIAN_FRONTEND=noninteractive
 
-        apt-get update -qq >/dev/null 2>&1 \
-            || die "apt update 失败。"
+        apt-get update -qq >/dev/null 2>&1 || \
+            die "apt update 失败。"
 
-        for pkg in curl openssl ca-certificates dnsutils; do
+        for pkg in curl openssl ca-certificates dnsutils bash; do
 
             if ! dpkg -s "$pkg" >/dev/null 2>&1; then
 
                 info "安装 $pkg ..."
 
-                apt-get install -y "$pkg" >/dev/null 2>&1 \
-                    || die "安装 $pkg 失败。"
+                apt-get install -y "$pkg" >/dev/null 2>&1 || \
+                    die "安装 $pkg 失败。"
 
             fi
 
@@ -321,7 +329,7 @@ install_dependencies() {
 
 setup_cron() {
 
-    info "检查自动任务服务..."
+    info "检查自动续签任务..."
 
     if [ "$OS" = "alpine" ]; then
 
@@ -340,9 +348,8 @@ setup_cron() {
 
             export DEBIAN_FRONTEND=noninteractive
 
-            apt-get install -y cron >/dev/null 2>&1 \
-                || die "cron 安装失败。"
-
+            apt-get install -y cron >/dev/null 2>&1 || \
+                die "cron 安装失败。"
         fi
 
         systemctl enable cron >/dev/null 2>&1 || true
@@ -354,29 +361,31 @@ setup_cron() {
 }
 
 # ============================================================
-# Nginx
+# Nginx 安装
 # ============================================================
 
 install_nginx() {
 
     if command -v nginx >/dev/null 2>&1; then
+
         ok "Nginx 已安装。"
-        return
+
+        return 0
     fi
 
     info "Nginx 未安装，正在安装..."
 
     if [ "$OS" = "alpine" ]; then
 
-        apk add --no-cache nginx >/dev/null 2>&1 \
-            || die "Nginx 安装失败。"
+        apk add --no-cache nginx >/dev/null 2>&1 || \
+            die "Nginx 安装失败。"
 
     else
 
         export DEBIAN_FRONTEND=noninteractive
 
-        apt-get install -y nginx >/dev/null 2>&1 \
-            || die "Nginx 安装失败。"
+        apt-get install -y nginx >/dev/null 2>&1 || \
+            die "Nginx 安装失败。"
 
     fi
 
@@ -384,7 +393,7 @@ install_nginx() {
 }
 
 # ============================================================
-# Nginx 服务
+# Nginx 启动
 # ============================================================
 
 nginx_start() {
@@ -392,7 +401,10 @@ nginx_start() {
     if [ "$OS" = "alpine" ]; then
 
         rc-update add nginx default >/dev/null 2>&1 || true
-        rc-service nginx start >/dev/null 2>&1 || true
+
+        if ! rc-service nginx status >/dev/null 2>&1; then
+            rc-service nginx start >/dev/null 2>&1 || true
+        fi
 
     else
 
@@ -419,12 +431,12 @@ nginx_reload() {
 
     if [ "$OS" = "alpine" ]; then
 
-        rc-service nginx reload >/dev/null 2>&1 \
-            || nginx -s reload
+        rc-service nginx reload >/dev/null 2>&1 || \
+            nginx -s reload >/dev/null 2>&1
 
     else
 
-        systemctl reload nginx
+        systemctl reload nginx >/dev/null 2>&1
 
     fi
 
@@ -432,27 +444,22 @@ nginx_reload() {
 }
 
 # ============================================================
-# 修复旧 acme.sh 环境
+# 准备 acme.sh 环境
 # ============================================================
 
 prepare_acme_environment() {
 
-    # 防止旧项目设置 LE_CONFIG_HOME
-    unset LE_CONFIG_HOME 2>/dev/null || true
-
     export HOME="/root"
 
-    # 强制 acme.sh 使用官方默认目录
-    export LE_CONFIG_HOME="/root/.acme.sh"
+    export LE_CONFIG_HOME="$ACME_HOME"
 
     mkdir -p "$ACME_HOME"
 
     chmod 700 "$ACME_HOME"
 
-    # 旧项目留下的路径不再使用
-    if [ -d "/opt/cert-manager/logs" ]; then
-        rm -rf "/opt/cert-manager"
-    fi
+    # 清理可能影响 acme.sh 的旧变量
+    unset CF_Key 2>/dev/null || true
+    unset CF_Email 2>/dev/null || true
 }
 
 # ============================================================
@@ -475,44 +482,43 @@ install_acme() {
     if [ -n "$EMAIL" ]; then
 
         curl -fsSL https://get.acme.sh \
-            | sh -s "email=$EMAIL" \
-            || die "acme.sh 安装失败。"
+            | sh -s "email=$EMAIL" || \
+            die "acme.sh 安装失败。"
 
     else
 
         curl -fsSL https://get.acme.sh \
-            | sh \
-            || die "acme.sh 安装失败。"
+            | sh || \
+            die "acme.sh 安装失败。"
 
     fi
 
     if [ ! -x "$ACME_HOME/acme.sh" ]; then
-        die "acme.sh 安装失败，未找到 $ACME_HOME/acme.sh"
+
+        die "acme.sh 安装完成，但没有找到 $ACME_HOME/acme.sh"
+
     fi
 
     ok "acme.sh 安装完成。"
 }
 
 # ============================================================
-# acme.sh
+# acme.sh 封装
 # ============================================================
 
 acme() {
 
     export HOME="/root"
-    export LE_CONFIG_HOME="/root/.acme.sh"
+    export LE_CONFIG_HOME="$ACME_HOME"
 
     "$ACME_HOME/acme.sh" "$@"
 }
 
 # ============================================================
-# 设置 CA
+# 设置 Let's Encrypt
 # ============================================================
 
 setup_acme_ca() {
-
-    export HOME="/root"
-    export LE_CONFIG_HOME="/root/.acme.sh"
 
     if [ -n "$EMAIL" ]; then
 
@@ -526,7 +532,7 @@ setup_acme_ca() {
 }
 
 # ============================================================
-# Cloudflare API 检查
+# Cloudflare Token 验证
 # ============================================================
 
 check_cloudflare() {
@@ -553,10 +559,15 @@ check_cloudflare() {
 
         die "请检查 Cloudflare API Token。"
     fi
+}
 
-    # --------------------------------------------------------
-    # 获取 Zone
-    # --------------------------------------------------------
+# ============================================================
+# Cloudflare Zone 检查
+# ============================================================
+
+check_cloudflare_zone() {
+
+    info "检查 Cloudflare Zone：$DOMAIN"
 
     ZONE_RESULT="$(
         curl -fsS \
@@ -565,17 +576,22 @@ check_cloudflare() {
             -H "Content-Type: application/json" \
             --data-urlencode "name=$DOMAIN" \
             --data-urlencode "status=active" \
-            --data-urlencode "per_page=1" \
+            --data-urlencode "per_page=20" \
             "https://api.cloudflare.com/client/v4/zones" \
             2>/dev/null
     )"
 
-    # 不再错误依赖 result_info 中 count 的顺序
-    if printf '%s' "$ZONE_RESULT" \
-        | grep -q '"success":true' \
-        && printf '%s' "$ZONE_RESULT" \
-        | grep -q "\"name\":\"$DOMAIN\""
-    then
+    if ! printf '%s' "$ZONE_RESULT" | grep -q '"success":true'; then
+
+        err "Cloudflare Zone API 查询失败。"
+
+        printf '%s\n' "$ZONE_RESULT"
+
+        die "请检查 Token 的 Zone 权限。"
+    fi
+
+    if printf '%s' "$ZONE_RESULT" | \
+        grep -q "\"name\":\"$DOMAIN\""; then
 
         ok "Cloudflare Zone：$DOMAIN"
 
@@ -587,6 +603,16 @@ check_cloudflare() {
 
         die "请确认 -d 主域名正确，并确认 Token 有 Zone/DNS 权限。"
     fi
+}
+
+# ============================================================
+# Cloudflare API 完整检查
+# ============================================================
+
+check_cloudflare_all() {
+
+    check_cloudflare
+    check_cloudflare_zone
 }
 
 # ============================================================
@@ -607,7 +633,7 @@ get_full_domain() {
 
         FULL_DOMAIN="$DOMAIN"
 
-    elif printf '%s' "$SUB" | grep -q "\.${DOMAIN}$"; then
+    elif [[ "$SUB" == *."$DOMAIN" ]]; then
 
         FULL_DOMAIN="$SUB"
 
@@ -619,45 +645,84 @@ get_full_domain() {
 }
 
 # ============================================================
-# 域名检查
+# 域名格式检查
 # ============================================================
 
 validate_domain() {
 
     D="$1"
 
-    case "$D" in
+    if [ -z "$D" ]; then
+        return 1
+    fi
 
-        ""|.*|*.|*..*)
-            return 1
-            ;;
+    if [[ "$D" == .* ]]; then
+        return 1
+    fi
 
-        *[!a-zA-Z0-9.-]*)
-            return 1
-            ;;
+    if [[ "$D" == *. ]]; then
+        return 1
+    fi
 
-    esac
+    if [[ "$D" == *..* ]]; then
+        return 1
+    fi
+
+    if [[ "$D" == *[^a-zA-Z0-9.-]* ]]; then
+        return 1
+    fi
 
     return 0
 }
 
 # ============================================================
-# 文件路径
+# 安全站点 ID
+# ============================================================
+
+site_id() {
+
+    printf '%s' "$1" | tr '.' '_'
+}
+
+# ============================================================
+# 站点信息文件
 # ============================================================
 
 site_info_file() {
 
-    printf "%s/%s.conf" "$SITES_DIR" "$1"
+    printf '%s/%s.conf' "$SITES_DIR" "$(site_id "$1")"
 }
+
+# ============================================================
+# Nginx 配置文件
+# ============================================================
 
 nginx_site_file() {
 
-    printf "%s/%s.conf" "$NGINX_AVAILABLE" "$1"
+    if [ "$OS" = "alpine" ]; then
+
+        printf '%s/%s.conf' \
+            "$NGINX_AVAILABLE" \
+            "$(site_id "$1")"
+
+    else
+
+        printf '%s/%s.conf' \
+            "$NGINX_AVAILABLE" \
+            "$(site_id "$1")"
+
+    fi
 }
+
+# ============================================================
+# 证书目录
+# ============================================================
 
 cert_dir() {
 
-    printf "%s/%s" "$BASE_DIR" "$1"
+    printf '%s/%s' \
+        "$CERTS_DIR" \
+        "$(site_id "$1")"
 }
 
 # ============================================================
@@ -667,17 +732,40 @@ cert_dir() {
 get_site_port() {
 
     SITE="$1"
+
     FILE="$(site_info_file "$SITE")"
 
     PORT=""
 
     if [ -f "$FILE" ]; then
+
+        # shellcheck disable=SC1090
         . "$FILE"
+
     fi
 }
 
 # ============================================================
-# 创建 Nginx 配置
+# 保存站点
+# ============================================================
+
+save_site() {
+
+    SITE="$1"
+    PORT="$2"
+
+    umask 077
+
+    cat > "$(site_info_file "$SITE")" <<EOF
+DOMAIN='$SITE'
+PORT='$PORT'
+EOF
+
+    chmod 600 "$(site_info_file "$SITE")"
+}
+
+# ============================================================
+# 创建 Nginx 正式配置
 # ============================================================
 
 create_nginx_config() {
@@ -688,6 +776,7 @@ create_nginx_config() {
     CONF="$(nginx_site_file "$SITE")"
     CERT="$(cert_dir "$SITE")"
 
+    mkdir -p "$(dirname "$CONF")"
     mkdir -p "$CERT"
 
     cat > "$CONF" <<EOF
@@ -757,7 +846,7 @@ EOF
         mkdir -p "$NGINX_ENABLED"
 
         ln -sf "$CONF" \
-            "${NGINX_ENABLED}/${SITE}.conf"
+            "${NGINX_ENABLED}/$(site_id "$SITE").conf"
 
     fi
 }
@@ -769,7 +858,10 @@ EOF
 create_temp_config() {
 
     SITE="$1"
+
     CONF="$(nginx_site_file "$SITE")"
+
+    mkdir -p "$(dirname "$CONF")"
 
     cat > "$CONF" <<EOF
 # Temporary configuration managed by nginx-ssl-manager
@@ -782,8 +874,8 @@ server {
     server_name ${SITE};
 
     location / {
+        default_type text/plain;
         return 200 "Nginx SSL Manager";
-        add_header Content-Type text/plain;
     }
 }
 EOF
@@ -793,26 +885,29 @@ EOF
         mkdir -p "$NGINX_ENABLED"
 
         ln -sf "$CONF" \
-            "${NGINX_ENABLED}/${SITE}.conf"
+            "${NGINX_ENABLED}/$(site_id "$SITE").conf"
 
     fi
 }
 
 # ============================================================
-# 保存站点
+# 删除 Nginx 配置
 # ============================================================
 
-save_site() {
+remove_nginx_config() {
 
     SITE="$1"
-    PORT="$2"
 
-    cat > "$(site_info_file "$SITE")" <<EOF
-DOMAIN='$SITE'
-PORT='$PORT'
-EOF
+    CONF="$(nginx_site_file "$SITE")"
 
-    chmod 600 "$(site_info_file "$SITE")"
+    rm -f "$CONF"
+
+    if [ "$OS" = "debian" ]; then
+
+        rm -f \
+            "${NGINX_ENABLED}/$(site_id "$SITE").conf"
+
+    fi
 }
 
 # ============================================================
@@ -827,8 +922,8 @@ issue_ssl() {
 
     export CF_Token="$CF_TOKEN"
 
-    # 防止旧变量影响
     unset CF_Key 2>/dev/null || true
+    unset CF_Email 2>/dev/null || true
 
     if acme \
         --issue \
@@ -849,7 +944,7 @@ issue_ssl() {
 }
 
 # ============================================================
-# 安装 SSL
+# 部署 SSL
 # ============================================================
 
 install_ssl() {
@@ -916,13 +1011,16 @@ add_site() {
     printf '主域名请输入：@\n\n'
     printf '子域名：'
 
-    read SUB
+    read -r SUB
 
-    [ -z "$SUB" ] && {
+    if [ -z "$SUB" ]; then
+
         warn "子域名不能为空。"
+
         pause
+
         return
-    }
+    fi
 
     get_full_domain "$SUB"
 
@@ -952,13 +1050,16 @@ add_site() {
     printf '默认地址：127.0.0.1\n'
     printf '端口：'
 
-    read PORT
+    read -r PORT
 
     case "$PORT" in
 
         ''|*[!0-9]*)
+
             err "端口必须是数字。"
+
             pause
+
             return
             ;;
 
@@ -977,15 +1078,11 @@ add_site() {
     printf '%s\n' "-----------------------------------------"
     printf '域名：%s\n' "$FULL_DOMAIN"
     printf '后端：127.0.0.1:%s\n' "$PORT"
-    printf 'SSL：Let's Encrypt\n'
+    printf 'SSL：Let'\''s Encrypt\n'
     printf '验证：Cloudflare DNS-01\n'
     printf '续签：自动\n'
     printf '%s\n' "-----------------------------------------"
     printf '\n'
-
-    # --------------------------------------------------------
-    # 先临时创建 HTTP 配置
-    # --------------------------------------------------------
 
     create_temp_config "$FULL_DOMAIN"
 
@@ -995,11 +1092,7 @@ add_site() {
 
         nginx -t
 
-        rm -f "$CONF"
-
-        if [ "$OS" = "debian" ]; then
-            rm -f "${NGINX_ENABLED}/${FULL_DOMAIN}.conf"
-        fi
+        remove_nginx_config "$FULL_DOMAIN"
 
         pause
 
@@ -1008,38 +1101,28 @@ add_site() {
 
     nginx_reload >/dev/null 2>&1 || true
 
-    # --------------------------------------------------------
-    # DNS-01 申请证书
-    # --------------------------------------------------------
-
     if ! issue_ssl "$FULL_DOMAIN"; then
 
         warn "SSL 申请失败。"
 
-        warn "暂时保留站点配置。"
+        warn "删除临时站点配置。"
 
-        save_site "$FULL_DOMAIN" "$PORT"
+        remove_nginx_config "$FULL_DOMAIN"
+
+        nginx_reload >/dev/null 2>&1 || true
 
         pause
 
         return
     fi
 
-    # --------------------------------------------------------
-    # 写入正式 Nginx 配置
-    # --------------------------------------------------------
+    create_nginx_config \
+        "$FULL_DOMAIN" \
+        "$PORT"
 
-    create_nginx_config "$FULL_DOMAIN" "$PORT"
-
-    # --------------------------------------------------------
-    # 保存站点
-    # --------------------------------------------------------
-
-    save_site "$FULL_DOMAIN" "$PORT"
-
-    # --------------------------------------------------------
-    # 部署证书
-    # --------------------------------------------------------
+    save_site \
+        "$FULL_DOMAIN" \
+        "$PORT"
 
     if ! install_ssl "$FULL_DOMAIN"; then
 
@@ -1049,10 +1132,6 @@ add_site() {
 
         return
     fi
-
-    # --------------------------------------------------------
-    # 最终 Nginx 检查
-    # --------------------------------------------------------
 
     if ! nginx -t; then
 
@@ -1069,8 +1148,11 @@ add_site() {
 
     printf '\n'
     printf '%s\n' "========================================="
+
     ok "站点创建完成"
+
     printf '%s\n' "========================================="
+
     printf '\n'
 
     printf '域名：%s\n' "$FULL_DOMAIN"
@@ -1085,7 +1167,7 @@ add_site() {
 }
 
 # ============================================================
-# 站点列表
+# 列出站点
 # ============================================================
 
 list_sites() {
@@ -1104,23 +1186,34 @@ list_sites() {
 
         unset DOMAIN PORT 2>/dev/null || true
 
+        # shellcheck disable=SC1090
         . "$FILE"
 
         COUNT=$((COUNT + 1))
 
-        printf '\n%d. %s\n' "$COUNT" "$DOMAIN"
-        printf '   后端：127.0.0.1:%s\n' "$PORT"
+        printf '\n%d. %s\n' \
+            "$COUNT" \
+            "$DOMAIN"
+
+        printf '   后端：127.0.0.1:%s\n' \
+            "$PORT"
 
         if [ -f "$(cert_dir "$DOMAIN")/fullchain.pem" ]; then
+
             printf '   SSL：✓\n'
+
         else
+
             printf '   SSL：✗\n'
+
         fi
 
     done
 
     if [ "$COUNT" -eq 0 ]; then
+
         printf '\n暂无站点。\n'
+
     fi
 
     printf '\n'
@@ -1146,12 +1239,15 @@ choose_site() {
 
         unset DOMAIN PORT 2>/dev/null || true
 
+        # shellcheck disable=SC1090
         . "$FILE"
 
         COUNT=$((COUNT + 1))
 
         printf '%d. %s -> 127.0.0.1:%s\n' \
-            "$COUNT" "$DOMAIN" "$PORT"
+            "$COUNT" \
+            "$DOMAIN" \
+            "$PORT"
 
         printf '%s\n' "$DOMAIN" >> "$SELECT_FILE"
 
@@ -1167,7 +1263,7 @@ choose_site() {
     printf '\n0. 返回\n\n'
     printf '请选择：'
 
-    read NUM
+    read -r NUM
 
     if [ "$NUM" = "0" ]; then
 
@@ -1176,17 +1272,32 @@ choose_site() {
         return 1
     fi
 
-    TARGET="$(sed -n "${NUM}p" "$SELECT_FILE" 2>/dev/null)"
+    case "$NUM" in
+
+        ''|*[!0-9]*)
+
+            rm -f "$SELECT_FILE"
+
+            return 1
+            ;;
+
+    esac
+
+    TARGET="$(
+        sed -n "${NUM}p" "$SELECT_FILE" 2>/dev/null
+    )"
 
     rm -f "$SELECT_FILE"
 
-    [ -z "$TARGET" ] && return 1
+    if [ -z "$TARGET" ]; then
+        return 1
+    fi
 
     return 0
 }
 
 # ============================================================
-# 修改反向代理端口
+# 修改端口
 # ============================================================
 
 modify_port() {
@@ -1213,17 +1324,21 @@ modify_port() {
     get_site_port "$SITE"
 
     printf '\n当前：%s -> 127.0.0.1:%s\n' \
-        "$SITE" "$PORT"
+        "$SITE" \
+        "$PORT"
 
     printf '\n请输入新端口：'
 
-    read NEW_PORT
+    read -r NEW_PORT
 
     case "$NEW_PORT" in
 
         ''|*[!0-9]*)
+
             err "端口必须是数字。"
+
             pause
+
             return
             ;;
 
@@ -1238,17 +1353,24 @@ modify_port() {
         return
     fi
 
-    # 备份
-    mkdir -p "$BACKUP_DIR/$SITE"
-
     CONF="$(nginx_site_file "$SITE")"
 
-    [ -f "$CONF" ] && \
-        cp "$CONF" "$BACKUP_DIR/$SITE/$(date '+%Y%m%d-%H%M%S').conf"
+    mkdir -p "$BACKUP_DIR/$(site_id "$SITE")"
 
-    create_nginx_config "$SITE" "$NEW_PORT"
+    if [ -f "$CONF" ]; then
 
-    save_site "$SITE" "$NEW_PORT"
+        cp "$CONF" \
+            "$BACKUP_DIR/$(site_id "$SITE")/$(date '+%Y%m%d-%H%M%S').conf"
+
+    fi
+
+    create_nginx_config \
+        "$SITE" \
+        "$NEW_PORT"
+
+    save_site \
+        "$SITE" \
+        "$NEW_PORT"
 
     if nginx -t >/dev/null 2>&1; then
 
@@ -1257,7 +1379,8 @@ modify_port() {
         ok "端口修改成功。"
 
         printf '\n%s -> 127.0.0.1:%s\n' \
-            "$SITE" "$NEW_PORT"
+            "$SITE" \
+            "$NEW_PORT"
 
         log "修改端口 $SITE -> $NEW_PORT"
 
@@ -1266,6 +1389,7 @@ modify_port() {
         err "Nginx 配置检查失败。"
 
         nginx -t
+
     fi
 
     pause
@@ -1305,7 +1429,7 @@ delete_site() {
 
     printf '\n请输入 DELETE 确认删除：'
 
-    read CONFIRM
+    read -r CONFIRM
 
     if [ "$CONFIRM" != "DELETE" ]; then
 
@@ -1317,31 +1441,32 @@ delete_site() {
     fi
 
     CONF="$(nginx_site_file "$SITE")"
+    INFO_FILE="$(site_info_file "$SITE")"
 
-    # 备份配置
-    mkdir -p "$BACKUP_DIR/$SITE"
+    mkdir -p "$BACKUP_DIR/$(site_id "$SITE")"
 
-    [ -f "$CONF" ] && \
-        cp "$CONF" "$BACKUP_DIR/$SITE/"
+    if [ -f "$CONF" ]; then
 
-    [ -f "$(site_info_file "$SITE")" ] && \
-        cp "$(site_info_file "$SITE")" "$BACKUP_DIR/$SITE/"
+        cp "$CONF" \
+            "$BACKUP_DIR/$(site_id "$SITE")/"
 
-    # 删除 Nginx
-    rm -f "$CONF"
-
-    if [ "$OS" = "debian" ]; then
-        rm -f "${NGINX_ENABLED}/${SITE}.conf"
     fi
 
-    # 删除站点记录
-    rm -f "$(site_info_file "$SITE")"
+    if [ -f "$INFO_FILE" ]; then
 
-    # 删除证书
+        cp "$INFO_FILE" \
+            "$BACKUP_DIR/$(site_id "$SITE")/"
+
+    fi
+
+    remove_nginx_config "$SITE"
+
+    rm -f "$INFO_FILE"
+
     rm -rf "$(cert_dir "$SITE")"
 
-    # 删除 acme.sh 证书/续签配置
-    acme --remove \
+    acme \
+        --remove \
         -d "$SITE" \
         --ecc >/dev/null 2>&1 || true
 
@@ -1380,6 +1505,7 @@ ssl_status() {
 
         unset DOMAIN PORT 2>/dev/null || true
 
+        # shellcheck disable=SC1090
         . "$FILE"
 
         COUNT=$((COUNT + 1))
@@ -1398,8 +1524,8 @@ ssl_status() {
                     openssl x509 \
                         -in "$CERT" \
                         -noout \
-                        -enddate 2>/dev/null \
-                        | sed 's/^notAfter=//'
+                        -enddate 2>/dev/null |
+                    sed 's/^notAfter=//'
                 )"
 
                 printf '到期：%s\n' "$END_DATE"
@@ -1414,7 +1540,11 @@ ssl_status() {
 
     done
 
-    [ "$COUNT" -eq 0 ] && printf '\n暂无站点。\n'
+    if [ "$COUNT" -eq 0 ]; then
+
+        printf '\n暂无站点。\n'
+
+    fi
 
     printf '\n'
 
@@ -1422,7 +1552,7 @@ ssl_status() {
 }
 
 # ============================================================
-# Nginx 检查
+# Nginx 配置检查
 # ============================================================
 
 nginx_check() {
@@ -1430,7 +1560,7 @@ nginx_check() {
     clear 2>/dev/null || true
 
     printf '%s\n' "========================================="
-    printf '             Nginx 检查\n'
+    printf '             Nginx 配置检查\n'
     printf '%s\n' "========================================="
 
     printf '\n'
@@ -1486,10 +1616,14 @@ system_status() {
     printf '\n'
 
     if [ "$OS" = "alpine" ]; then
+
         printf '系统：Alpine Linux %s\n' \
             "$(cat /etc/alpine-release)"
+
     else
+
         printf '系统：Debian\n'
+
     fi
 
     printf '架构：%s\n' "$ARCH"
@@ -1497,40 +1631,57 @@ system_status() {
     printf '主域名：%s\n' "$DOMAIN"
 
     if [ -n "$EMAIL" ]; then
+
         printf '邮箱：%s\n' "$EMAIL"
+
     else
+
         printf '邮箱：未设置\n'
+
     fi
 
     printf '\nNginx：'
+
     nginx -v 2>&1
 
     printf '\nacme.sh：'
 
     if [ -x "$ACME_HOME/acme.sh" ]; then
+
         acme --version 2>/dev/null | head -n 1
+
     else
+
         printf '未安装\n'
+
     fi
 
     printf '\n磁盘：\n'
-    df -h / | tail -n 1
+
+    df -h /
 
     printf '\n内存：\n'
 
     if command -v free >/dev/null 2>&1; then
+
         free -h
+
     else
-        grep -E 'MemTotal|MemAvailable' \
+
+        grep -E \
+            'MemTotal|MemAvailable' \
             /proc/meminfo 2>/dev/null || true
+
     fi
 
     printf '\nIPv6：\n'
 
     if command -v ip >/dev/null 2>&1; then
-        ip -6 addr show scope global 2>/dev/null \
-            | grep 'inet6 ' \
-            | head -n 5 || true
+
+        ip -6 addr show scope global 2>/dev/null |
+            grep 'inet6 ' |
+            head -n 5 || true
+
     fi
 
     printf '\n'
@@ -1572,7 +1723,7 @@ menu() {
 
         printf '\n请选择：'
 
-        read CHOICE
+        read -r CHOICE
 
         case "$CHOICE" in
 
@@ -1609,12 +1760,16 @@ menu() {
                 ;;
 
             0)
+
                 printf '\n退出。\n'
+
                 exit 0
                 ;;
 
             *)
+
                 warn "无效选择。"
+
                 sleep 1
                 ;;
 
@@ -1629,7 +1784,11 @@ menu() {
 
 main() {
 
+    check_bash
+
     check_root
+
+    parse_args
 
     detect_os
 
@@ -1651,7 +1810,7 @@ main() {
 
     save_config
 
-    check_cloudflare
+    check_cloudflare_all
 
     if ! nginx -t >/dev/null 2>&1; then
 
