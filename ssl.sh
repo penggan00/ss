@@ -106,37 +106,28 @@ check_root() {
 
 # ============================================================
 # 参数解析
-#
-# bash -c:
-#
-# bash -c "script" _ -e xxx -d xxx -t xxx
-#
-# $0 = _
-# $1 = -e
-# $2 = email
-#
-# 所以直接 getopts 即可。
 # ============================================================
 
-while getopts "e:d:t:h" opt; do
+parse_args() {
+    while getopts "e:d:t:h" opt; do
 
-    case "$opt" in
+        case "$opt" in
 
-        e)
-            EMAIL="$OPTARG"
-            ;;
+            e)
+                EMAIL="$OPTARG"
+                ;;
 
-        d)
-            DOMAIN="$OPTARG"
-            ;;
+            d)
+                DOMAIN="$OPTARG"
+                ;;
 
-        t)
-            CF_TOKEN="$OPTARG"
-            ;;
+            t)
+                CF_TOKEN="$OPTARG"
+                ;;
 
-        h)
+            h)
 
-            cat <<EOF
+                cat <<EOF
 
 Nginx SSL Manager $VERSION
 
@@ -156,44 +147,41 @@ _ \\
 
 EOF
 
-            exit 0
-            ;;
+                exit 0
+                ;;
 
-        \?)
-            die "未知参数。使用 -h 查看帮助。"
-            ;;
+            \?)
+                die "未知参数。使用 -h 查看帮助。"
+                ;;
 
-        :)
-            die "参数 -$OPTARG 缺少参数。"
-            ;;
+            :)
+                die "参数 -$OPTARG 缺少参数。"
+                ;;
 
+        esac
+
+    done
+
+    # 参数检查
+    if [ -z "$DOMAIN" ]; then
+        die "缺少 -d 主域名。"
+    fi
+
+    if [ -z "$CF_TOKEN" ]; then
+        die "缺少 -t Cloudflare API Token。"
+    fi
+
+    DOMAIN="${DOMAIN%/}"
+    DOMAIN="${DOMAIN#.}"
+
+    case "$DOMAIN" in
+        *.*)
+            ;;
+        *)
+            die "主域名格式不正确：$DOMAIN"
+            ;;
     esac
-
-done
-
-
-# ============================================================
-# 参数检查
-# ============================================================
-
-if [ -z "$DOMAIN" ]; then
-    die "缺少 -d 主域名。"
-fi
-
-if [ -z "$CF_TOKEN" ]; then
-    die "缺少 -t Cloudflare API Token。"
-fi
-
-DOMAIN="${DOMAIN%/}"
-DOMAIN="${DOMAIN#.}"
-
-case "$DOMAIN" in
-    *.*)
-        ;;
-    *)
-        die "主域名格式不正确：$DOMAIN"
-        ;;
-esac
+}
 
 
 # ============================================================
@@ -1070,7 +1058,7 @@ add_site() {
     printf '%s\n' "-----------------------------------------"
     printf '域名：%s\n' "$FULL_DOMAIN"
     printf '后端：127.0.0.1:%s\n' "$PORT"
-    printf 'SSL：Let's Encrypt\n'
+    printf 'SSL：Let'\''s Encrypt\n'
     printf '验证：Cloudflare DNS-01\n'
     printf '续签：自动\n'
     printf '%s\n' "-----------------------------------------"
@@ -1932,6 +1920,9 @@ menu() {
 main() {
 
     check_root
+
+    # 参数解析
+    parse_args "$@"
 
     detect_os
 
