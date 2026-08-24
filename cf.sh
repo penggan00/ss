@@ -9,11 +9,44 @@ set -e
 PROXY=$( [ "$CF_PROXY" = "1" ] && echo true || echo false )
 TTL=$( [ -z "$CF_TTL" ] || [ "$CF_TTL" = "auto" ]; echo ${CF_TTL:+$CF_TTL} | grep -q "auto" && echo 1 || echo $CF_TTL )
 
+# ========== 强制 IPv6 模式（新增） ==========
+FORCE_IPV6="${FORCE_IPV6:-0}"
+if [ "$FORCE_IPV6" = "1" ]; then
+    echo "🔒 强制使用 IPv6 模式"
+    
+    # 从 pppoe-wan 接口获取（你的 OpenWrt 专用）
+    IPV6=$(ip -6 addr show dev pppoe-wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    
+    # 如果 pppoe-wan 没有，尝试 wan 接口
+    if [ -z "$IPV6" ]; then
+        echo "  ⚠️ pppoe-wan 未获取到，尝试 wan..."
+        IPV6=$(ip -6 addr show dev wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    fi
+    
+    # 如果还是失败，尝试外部服务
+    if [ -z "$IPV6" ]; then
+        echo "  ⚠️ 本地获取失败，尝试外部服务..."
+        IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
+    fi
+    
+    # 检查是否获取到有效的公网 IPv6
+    if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
+        IP="$IPV6"
+        TYPE="AAAA"
+        echo "✅ 获取到 IPv6: $IP"
+    else
+        echo "❌ 无法获取公网 IPv6"
+        exit 1
+    fi
+    # 设置标记，跳过后续自动检测
+    SKIP_AUTO=1
+fi
+
 # ========== 新增：检查是否手动指定了 IP ==========
 MANUAL_IP="$IP"  # 读取环境变量 IP
 
-if [ -n "$MANUAL_IP" ]; then
-    # 用户手动指定了 IP，直接使用
+if [ -n "$MANUAL_IP" ] && [ "$FORCE_IPV6" != "1" ]; then
+    # 用户手动指定了 IP，直接使用（如果强制 IPv6 模式已设置，则忽略手动 IP）
     echo "📝 使用手动指定的 IP: $MANUAL_IP"
     IP="$MANUAL_IP"
     
@@ -26,7 +59,7 @@ if [ -n "$MANUAL_IP" ]; then
         IP_VER="IPv4"
     fi
     echo "✅ 已设置为 $IP_VER 记录 ($TYPE)"
-else
+elif [ -z "$SKIP_AUTO" ]; then
     # ========== 原有的自动获取 IP 逻辑 ==========
     echo "🌐 获取真实公网 IP..."
     IPV4=""
@@ -43,13 +76,19 @@ else
     done
 
     if [ -z "$IPV4" ]; then
-        # IPv6 检测（跳过私有）
-        IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
+        # IPv6 检测（从 pppoe-wan 获取）
+        IPV6=$(ip -6 addr show dev pppoe-wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
         if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
             echo "  ✅ IPv6: $IPV6"
         else
-            echo "  ❌ 无法获取公网 IP"
-            exit 1
+            # 备用：从 wan 接口获取
+            IPV6=$(ip -6 addr show dev wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+            if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
+                echo "  ✅ IPv6: $IPV6"
+            else
+                echo "  ❌ 无法获取公网 IP"
+                exit 1
+            fi
         fi
     fi
 
