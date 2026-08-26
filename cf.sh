@@ -9,15 +9,21 @@ set -e
 PROXY=$( [ "$CF_PROXY" = "1" ] && echo true || echo false )
 TTL=$( [ -z "$CF_TTL" ] || [ "$CF_TTL" = "auto" ]; echo ${CF_TTL:+$CF_TTL} | grep -q "auto" && echo 1 || echo $CF_TTL )
 
-# ========== 强制 IPv6 模式 ==========
+# ========== 强制 IPv6 模式（新增） ==========
 FORCE_IPV6="${FORCE_IPV6:-0}"
 if [ "$FORCE_IPV6" = "1" ]; then
     echo "🔒 强制使用 IPv6 模式"
     
-    # 方法1：从所有接口获取公网 IPv6（通用）
-    IPV6=$(ip -6 addr show | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | grep -v '::1' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    # 从 pppoe-wan 接口获取（你的 OpenWrt 专用）
+    IPV6=$(ip -6 addr show dev pppoe-wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
     
-    # 方法2：如果本地没有，尝试外部服务
+    # 如果 pppoe-wan 没有，尝试 wan 接口
+    if [ -z "$IPV6" ]; then
+        echo "  ⚠️ pppoe-wan 未获取到，尝试 wan..."
+        IPV6=$(ip -6 addr show dev wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+    fi
+    
+    # 如果还是失败，尝试外部服务
     if [ -z "$IPV6" ]; then
         echo "  ⚠️ 本地获取失败，尝试外部服务..."
         IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
@@ -32,16 +38,19 @@ if [ "$FORCE_IPV6" = "1" ]; then
         echo "❌ 无法获取公网 IPv6"
         exit 1
     fi
+    # 设置标记，跳过后续自动检测
     SKIP_AUTO=1
 fi
 
-# ========== 手动指定 IP ==========
-MANUAL_IP="$IP"
+# ========== 新增：检查是否手动指定了 IP ==========
+MANUAL_IP="$IP"  # 读取环境变量 IP
 
 if [ -n "$MANUAL_IP" ] && [ "$FORCE_IPV6" != "1" ]; then
+    # 用户手动指定了 IP，直接使用（如果强制 IPv6 模式已设置，则忽略手动 IP）
     echo "📝 使用手动指定的 IP: $MANUAL_IP"
     IP="$MANUAL_IP"
     
+    # 自动判断是 IPv4 还是 IPv6
     if echo "$IP" | grep -q ':'; then
         TYPE="AAAA"
         IP_VER="IPv6"
@@ -51,71 +60,46 @@ if [ -n "$MANUAL_IP" ] && [ "$FORCE_IPV6" != "1" ]; then
     fi
     echo "✅ 已设置为 $IP_VER 记录 ($TYPE)"
 elif [ -z "$SKIP_AUTO" ]; then
-    # ========== 自动获取 IP（兼容所有系统） ==========
+    # ========== 原有的自动获取 IP 逻辑 ==========
     echo "🌐 获取真实公网 IP..."
     IPV4=""
     IPV6=""
 
-    # IPv4 检测（优先外部服务，最可靠）
+    # IPv4 检测（跳过私有和 WARP）
     for SERVICE in "ipv4.ip.sb" "v4.ident.me" "api.ipify.org"; do
         TEMP_IP=$(curl -s --connect-timeout 3 -4 "$SERVICE" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)
         if [ -n "$TEMP_IP" ] && ! echo "$TEMP_IP" | grep -qE '^(100\.|172\.16\.|10\.|192\.168\.)'; then
             IPV4="$TEMP_IP"
-            echo "  ✅ IPv4 (外部): $IPV4"
+            echo "  ✅ IPv4: $IPV4"
             break
         fi
     done
 
-    # 如果外部服务失败，尝试从本地接口获取 IPv4
     if [ -z "$IPV4" ]; then
-        # 获取所有非 lo 接口的 IPv4
-        for IFACE in $(ip -4 addr show | grep -E '^[0-9]+:' | awk -F: '{print $2}' | tr -d ' ' | grep -v 'lo'); do
-            TEMP_IP=$(ip -4 addr show dev "$IFACE" 2>/dev/null | grep 'inet' | grep -v '127.0.0.1' | awk '{print $2}' | cut -d/ -f1 | head -1)
-            if [ -n "$TEMP_IP" ] && ! echo "$TEMP_IP" | grep -qE '^(100\.|172\.16\.|10\.|192\.168\.)'; then
-                IPV4="$TEMP_IP"
-                echo "  ✅ IPv4 (本地 $IFACE): $IPV4"
-                break
-            fi
-        done
-    fi
-
-    # IPv6 检测（从所有接口获取）
-    if [ -z "$IPV4" ]; then
-        # 获取所有非 lo 接口的公网 IPv6
-        for IFACE in $(ip -6 addr show | grep -E '^[0-9]+:' | awk -F: '{print $2}' | tr -d ' ' | grep -v 'lo'); do
-            TEMP_IP=$(ip -6 addr show dev "$IFACE" 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | grep -v '::1' | awk '{print $2}' | cut -d/ -f1 | head -1)
-            if [ -n "$TEMP_IP" ] && ! echo "$TEMP_IP" | grep -qiE '^(fc|fd|fe80|100:)'; then
-                IPV6="$TEMP_IP"
-                echo "  ✅ IPv6 (本地 $IFACE): $IPV6"
-                break
-            fi
-        done
-        
-        # 如果本地没有，尝试外部服务
-        if [ -z "$IPV6" ]; then
-            IPV6=$(curl -s --connect-timeout 3 -6 ip.sb 2>/dev/null | grep -Eo '([a-f0-9:]+:+)+[a-f0-9]+' | head -1)
-            if [ -n "$IPV6" ]; then
-                echo "  ✅ IPv6 (外部): $IPV6"
+        # IPv6 检测（从 pppoe-wan 获取）
+        IPV6=$(ip -6 addr show dev pppoe-wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+        if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
+            echo "  ✅ IPv6: $IPV6"
+        else
+            # 备用：从 wan 接口获取
+            IPV6=$(ip -6 addr show dev wan 2>/dev/null | grep 'inet6' | grep -v 'fe80' | grep -v 'fd' | grep -v 'fc' | head -1 | awk '{print $2}' | cut -d/ -f1)
+            if [ -n "$IPV6" ] && ! echo "$IPV6" | grep -qiE '^(fc|fd|fe80|100:)'; then
+                echo "  ✅ IPv6: $IPV6"
+            else
+                echo "  ❌ 无法获取公网 IP"
+                exit 1
             fi
         fi
     fi
 
-    # 最终判断
-    if [ -n "$IPV4" ]; then
-        IP="$IPV4"
-        TYPE="A"
-        echo "📝 使用 IPv4: $IP"
-    elif [ -n "$IPV6" ]; then
-        IP="$IPV6"
-        TYPE="AAAA"
-        echo "📝 使用 IPv6: $IP"
-    else
-        echo "❌ 无法获取公网 IP"
-        exit 1
-    fi
+    IP="${IPV4:-$IPV6}"
+    TYPE="A"
+    [ -z "$IPV4" ] && TYPE="AAAA"
+    echo "📝 使用自动获取的 ${TYPE}: $IP"
 fi
+# ========== 自动获取 IP 逻辑结束 ==========
 
-# ========== 获取 Zone ID ==========
+# 获取 Zone ID（只获取一次）
 get_zone_id() {
     curl -s "https://api.cloudflare.com/client/v4/zones?name=$DOMAIN" \
         -H "Authorization: Bearer $CF_KEY" \
@@ -126,7 +110,7 @@ get_zone_id() {
 ZONE_ID=$(get_zone_id)
 [ -z "$ZONE_ID" ] && echo "❌ 无法获取 Zone ID" && exit 1
 
-# ========== 更新 DNS 记录 ==========
+# 更新 DNS 记录
 update_record() {
     local full_domain="$1"
     echo "🔄 处理: $full_domain"
@@ -156,14 +140,15 @@ update_record() {
         ERR=$(echo "$RES" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"//')
         echo "❌ $full_domain: $ERR"
     fi
-    sleep 1
+    sleep 1  # 避免 API 限流
 }
 
-# ========== 主执行 ==========
+# 主执行
 echo "========================================="
 echo "🚀 Cloudflare DDNS 更新"
 echo "========================================="
 
+# 修复：不使用管道循环，避免子 shell 问题
 OLD_IFS="$IFS"
 IFS=','
 
