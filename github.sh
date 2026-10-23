@@ -17,6 +17,7 @@ declare -A FILES_TO_MONITOR=(
     ["rss.py"]="https://raw.githubusercontent.com/penggan00/rss/main/rss.py"
     ["rss_config.py"]="https://raw.githubusercontent.com/penggan00/rss/main/rss_config.py"
     ["gpt.py"]="https://raw.githubusercontent.com/penggan00/rss/main/gpt.py"
+    ["usd.py"]="https://raw.githubusercontent.com/penggan00/rss/main/usd.py"
     ["qq.py"]="https://raw.githubusercontent.com/penggan00/rss/main/qq.py"
     ["mail.py"]="https://raw.githubusercontent.com/penggan00/rss/main/mail.py"
 )
