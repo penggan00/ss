@@ -51,7 +51,6 @@ SINGBOX_PIN_SHA="1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3
 SINGBOX_PIN_URL="https://raw.githubusercontent.com/penggan00/ss/main/sing-box-amd64"
 
 # 使用当前修改后的脚本作为快捷方式脚本
-agsbxurl="$XRAY_PIN_URL"
 agsbxurl="https://raw.githubusercontent.com/penggan00/ss/main/argosbx.sh"
 showmode(){
 echo "Argosbx脚本一键SSH命令生器在线网址：https://yonggekkk.github.io/argosbx/"
