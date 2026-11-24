@@ -1016,9 +1016,10 @@ start_pre() {
     chmod 600 /dev/net/tun || return 1
 }
 EOF
-chmod +x /etc/init.d/xray >/dev/null 2>&1
-rc-update add xray default >/dev/null 2>&1
-rc-service xray start >/dev/null 2>&1
+chmod +x /etc/init.d/xray
+rc-update add xray default
+rc-service xray start
+
 else
 nohup "$HOME/agsbx/xray" run -c "$HOME/agsbx/xr.json" >/dev/null 2>&1 &
 fi
