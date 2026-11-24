@@ -987,16 +987,33 @@ systemctl daemon-reload >/dev/null 2>&1
 systemctl enable xr >/dev/null 2>&1
 systemctl start xr >/dev/null 2>&1
 elif command -v rc-service >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
-cat > /etc/init.d/xray <<EOF
+cat > /etc/init.d/xray <<'EOF'
 #!/sbin/openrc-run
 description="xr service"
 command="/root/agsbx/xray"
 command_args="run -c /root/agsbx/xr.json"
-command_background=yes
-pidfile="/run/xray.pid"
 command_background="yes"
+pidfile="/run/xray.pid"
+
 depend() {
-need net
+    need net
+}
+
+start_pre() {
+    modprobe tun 2>/dev/null || true
+
+    if [ ! -c /dev/net/tun ]; then
+        mkdir -p /dev/net || return 1
+
+        if [ -e /dev/net/tun ]; then
+            echo "/dev/net/tun 已存在，但不是字符设备"
+            return 1
+        fi
+
+        mknod /dev/net/tun c 10 200 || return 1
+    fi
+
+    chmod 600 /dev/net/tun || return 1
 }
 EOF
 chmod +x /etc/init.d/xray >/dev/null 2>&1
