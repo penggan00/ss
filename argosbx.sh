@@ -327,13 +327,25 @@ fi
 echo "$ym_vl_re" > "$HOME/agsbx/ym_vl_re"
 echo "Reality域名：$ym_vl_re"
 if [ ! -e "$HOME/agsbx/xrk/private_key" ]; then
-key_pair=$("$HOME/agsbx/xray" x25519)
-private_key=$(echo "$key_pair" | grep "PrivateKey" | awk '{print $2}')
-public_key=$(echo "$key_pair" | grep "Password" | awk '{print $2}')
-short_id=$(date +%s%N | sha256sum | cut -c 1-8)
-echo "$private_key" > "$HOME/agsbx/xrk/private_key"
-echo "$public_key" > "$HOME/agsbx/xrk/public_key"
-echo "$short_id" > "$HOME/agsbx/xrk/short_id"
+    key_pair=$("$HOME/agsbx/xray" x25519)
+
+    private_key=$(printf '%s\n' "$key_pair" |
+        awk '/^PrivateKey:/ {print $2; exit}')
+
+    public_key=$(printf '%s\n' "$key_pair" |
+        awk '/^Password \(PublicKey\):/ {print $3; exit}')
+
+    if [ -z "$private_key" ] || [ -z "$public_key" ] ||
+       [ "$public_key" = "(PublicKey):" ]; then
+        echo "Reality密钥解析失败，未写入密钥文件"
+        exit 1
+    fi
+
+    short_id=$(date +%s%N | sha256sum | cut -c 1-8)
+
+    printf '%s\n' "$private_key" > "$HOME/agsbx/xrk/private_key"
+    printf '%s\n' "$public_key" > "$HOME/agsbx/xrk/public_key"
+    printf '%s\n' "$short_id" > "$HOME/agsbx/xrk/short_id"
 fi
 private_key_x=$(cat "$HOME/agsbx/xrk/private_key")
 public_key_x=$(cat "$HOME/agsbx/xrk/public_key")
