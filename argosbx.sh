@@ -306,6 +306,16 @@ installxray(){
 echo
 echo "=========启用xray内核========="
 mkdir -p "$HOME/agsbx/xrk"
+if [ -f /root/agsbx-reality-keystore/xrk/private_key ] &&
+   [ -f /root/agsbx-reality-keystore/xrk/public_key ] &&
+   [ -f /root/agsbx-reality-keystore/xrk/short_id ]; then
+    cp -f /root/agsbx-reality-keystore/xrk/private_key "$HOME/agsbx/xrk/private_key"
+    cp -f /root/agsbx-reality-keystore/xrk/public_key "$HOME/agsbx/xrk/public_key"
+    cp -f /root/agsbx-reality-keystore/xrk/short_id "$HOME/agsbx/xrk/short_id"
+    chmod 600 "$HOME/agsbx/xrk/private_key" \
+              "$HOME/agsbx/xrk/public_key" \
+              "$HOME/agsbx/xrk/short_id"
+fi
 if [ ! -e "$HOME/agsbx/xray" ]; then
     upxray || {
         echo "固定版 Xray下载或校验失败，安装终止"
@@ -1583,6 +1593,14 @@ fi
 
 if [ "$1" = "del" ]; then
 cleandel
+
+mkdir -p /root/agsbx-reality-keystore/xrk
+cp -f /root/agsbx/xrk/private_key /root/agsbx-reality-keystore/xrk/private_key 2>/dev/null
+cp -f /root/agsbx/xrk/public_key /root/agsbx-reality-keystore/xrk/public_key 2>/dev/null
+cp -f /root/agsbx/xrk/short_id /root/agsbx-reality-keystore/xrk/short_id 2>/dev/null
+chmod 700 /root/agsbx-reality-keystore
+chmod 600 /root/agsbx-reality-keystore/xrk/* 2>/dev/null
+
 rm -rf "$HOME/agsbx" "$HOME/agsb"
 echo "卸载完成"
 echo "欢迎继续使用甬哥侃侃侃ygkkk的Argosbx一键无交互小钢炮脚本💣" && sleep 2
