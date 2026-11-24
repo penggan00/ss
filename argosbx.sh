@@ -1106,21 +1106,44 @@ systemctl daemon-reload >/dev/null 2>&1
 systemctl enable sb >/dev/null 2>&1
 systemctl start sb >/dev/null 2>&1
 elif command -v rc-service >/dev/null 2>&1 && [ "$EUID" -eq 0 ]; then
-cat > /etc/init.d/sing-box <<EOF
+
+cat > /etc/init.d/sing-box <<'EOF'
 #!/sbin/openrc-run
-description="sb service"
+description="Sing-box proxy service"
+
 command="/root/agsbx/sing-box"
 command_args="run -c /root/agsbx/sb.json"
+
 command_background=yes
 pidfile="/run/sing-box.pid"
-command_background="yes"
+command_user="root"
+
+supervisor=supervise-daemon
+respawn_delay=3   
+respawn_max=0
+respawn_timeout=30
+
 depend() {
-need net
+    need net
+    after firewall
+}
+
+stop() {
+    default_stop
+    if [ -f "${pidfile}" ]; then
+        rm -f "${pidfile}"
+    fi
 }
 EOF
-chmod +x /etc/init.d/sing-box >/dev/null 2>&1
-rc-update add sing-box default >/dev/null 2>&1
-rc-service sing-box start >/dev/null 2>&1
+# 2. 设置执行权限
+chmod +x /etc/init.d/sing-box
+# 3. 添加到默认运行级别
+rc-update add sing-box default
+# 4. 启动服务
+rc-service sing-box start
+#每日定时重启
+(crontab -l 2>/dev/null | grep -v "sing-box") | crontab -
+(crontab -l 2>/dev/null; echo "0 5 * * * /sbin/rc-service sing-box restart") | crontab -
 else
 nohup "$HOME/agsbx/sing-box" run -c "$HOME/agsbx/sb.json" >/dev/null 2>&1 &
 fi
