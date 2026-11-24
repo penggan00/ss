@@ -41,7 +41,18 @@ export warp=${warp:-''}
 export name=${name:-''}
 export oap=${oap:-''}
 v46url="https://icanhazip.com"
-agsbxurl="https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh"
+# 固定内核配置：AMD64
+XRAY_PIN_VERSION="26.11.9"
+XRAY_PIN_SHA="e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d"
+XRAY_PIN_URL="https://raw.githubusercontent.com/penggan00/ss/main/xray-amd64"
+
+SINGBOX_PIN_VERSION="1.14.4"
+SINGBOX_PIN_SHA="1264361b5f8868c8768f7555d3e77e20118bf503c41ac08bb290a0d99056aa3a"
+SINGBOX_PIN_URL="https://raw.githubusercontent.com/penggan00/ss/main/sing-box-amd64"
+
+# 使用当前修改后的脚本作为快捷方式脚本
+agsbxurl="$XRAY_PIN_URL"
+agsbxurl="https://raw.githubusercontent.com/penggan00/ss/main/argosbx.sh"
 showmode(){
 echo "Argosbx脚本一键SSH命令生器在线网址：https://yonggekkk.github.io/argosbx/"
 echo "主脚本：bash <(curl -Ls https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh) 或 bash <(wget -qO- https://raw.githubusercontent.com/yonggekkk/argosbx/main/argosbx.sh)"
@@ -145,16 +156,138 @@ case "$warp" in *x6*) xryx='ForceIPv6' ;; *x*) xryx='ForceIPv4v6' ;; *) xryx='Fo
 fi
 }
 upxray(){
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/xray-$cpu"; out="$HOME/agsbx/xray"; (command -v curl >/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
-chmod +x "$HOME/agsbx/xray"
-sbcore=$("$HOME/agsbx/xray" version 2>/dev/null | awk '/^Xray/{print $2}')
-echo "已安装Xray正式版内核：$sbcore"
+    if [ "$cpu" != "amd64" ]; then
+        echo "固定内核中没有适用于当前架构的 Xray AMD64 文件"
+        return 1
+    fi
+
+    url="$XRAY_PIN_URL"
+    out="$HOME/agsbx/xray"
+    tmp="$out.tmp.$$"
+
+    rm -f "$tmp"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 2 --connect-timeout 15 --max-time 300 \
+            -o "$tmp" "$url"
+        rc=$?
+    elif command -v wget >/dev/null 2>&1; then
+        timeout 300 wget --tries=2 -qO "$tmp" "$url"
+        rc=$?
+    else
+        echo "缺少 curl 和 wget，无法下载固定版 Xray"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
+        echo "Xray固定内核下载失败"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    chmod +x "$tmp" || {
+        echo "无法设置 Xray 可执行权限"
+        rm -f "$tmp"
+        return 1
+    }
+
+    gotsha=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+    gotver=$("$tmp" version 2>/dev/null | awk '/^Xray/{print $2}')
+
+    if [ "$gotsha" != "$XRAY_PIN_SHA" ]; then
+        echo "Xray SHA-256 校验失败，拒绝安装"
+        echo "期望：$XRAY_PIN_SHA"
+        echo "实际：$gotsha"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if [ "$gotver" != "$XRAY_PIN_VERSION" ]; then
+        echo "Xray版本校验失败，拒绝安装"
+        echo "期望：$XRAY_PIN_VERSION"
+        echo "实际：$gotver"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv -f "$tmp" "$out" || {
+        echo "无法替换 Xray 内核文件"
+        rm -f "$tmp"
+        return 1
+    }
+
+    chmod +x "$out"
+
+    echo "已安装固定版 Xray 内核：$gotver"
+    return 0
 }
 upsingbox(){
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/sing-box-$cpu"; out="$HOME/agsbx/sing-box"; (command -v curl>/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
-chmod +x "$HOME/agsbx/sing-box"
-sbcore=$("$HOME/agsbx/sing-box" version 2>/dev/null | awk '/version/{print $NF}')
-echo "已安装Sing-box正式版内核：$sbcore"
+    if [ "$cpu" != "amd64" ]; then
+        echo "固定内核中没有适用于当前架构的 Sing-box AMD64 文件"
+        return 1
+    fi
+
+    url="$SINGBOX_PIN_URL"
+    out="$HOME/agsbx/sing-box"
+    tmp="$out.tmp.$$"
+
+    rm -f "$tmp"
+
+    if command -v curl >/dev/null 2>&1; then
+        curl -fL --retry 2 --connect-timeout 15 --max-time 300 \
+            -o "$tmp" "$url"
+        rc=$?
+    elif command -v wget >/dev/null 2>&1; then
+        timeout 300 wget --tries=2 -qO "$tmp" "$url"
+        rc=$?
+    else
+        echo "缺少 curl 和 wget，无法下载固定版 Sing-box"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if [ "$rc" -ne 0 ] || [ ! -s "$tmp" ]; then
+        echo "Sing-box固定内核下载失败"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    chmod +x "$tmp" || {
+        echo "无法设置 Sing-box 可执行权限"
+        rm -f "$tmp"
+        return 1
+    }
+
+    gotsha=$(sha256sum "$tmp" 2>/dev/null | awk '{print $1}')
+    gotver=$("$tmp" version 2>/dev/null | awk '/version/{print $NF}')
+
+    if [ "$gotsha" != "$SINGBOX_PIN_SHA" ]; then
+        echo "Sing-box SHA-256 校验失败，拒绝安装"
+        echo "期望：$SINGBOX_PIN_SHA"
+        echo "实际：$gotsha"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if [ "$gotver" != "$SINGBOX_PIN_VERSION" ]; then
+        echo "Sing-box版本校验失败，拒绝安装"
+        echo "期望：$SINGBOX_PIN_VERSION"
+        echo "实际：$gotver"
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv -f "$tmp" "$out" || {
+        echo "无法替换 Sing-box 内核文件"
+        rm -f "$tmp"
+        return 1
+    }
+
+    chmod +x "$out"
+
+    echo "已安装固定版 Sing-box 内核：$gotver"
+    return 0
 }
 insuuid(){
 if [ -z "$uuid" ] && [ ! -e "$HOME/agsbx/uuid" ]; then
@@ -175,7 +308,10 @@ echo
 echo "=========启用xray内核========="
 mkdir -p "$HOME/agsbx/xrk"
 if [ ! -e "$HOME/agsbx/xray" ]; then
-upxray
+    upxray || {
+        echo "固定版 Xray下载或校验失败，安装终止"
+        exit 1
+    }
 fi
 cat > "$HOME/agsbx/xr.json" <<EOF
 {
@@ -415,7 +551,10 @@ installsb(){
 echo
 echo "=========启用Sing-box内核========="
 if [ ! -e "$HOME/agsbx/sing-box" ]; then
-upsingbox
+    upsingbox || {
+        echo "固定版 Sing-box下载或校验失败，安装终止"
+        exit 1
+    }
 fi
 cat > "$HOME/agsbx/sb.json" <<EOF
 {
@@ -1430,15 +1569,44 @@ elif [ "$1" = "list" ]; then
 cip
 exit
 elif [ "$1" = "upx" ]; then
-for P in /proc/[0-9]*; do [ -L "$P/exe" ] || continue; TARGET=$(readlink -f "$P/exe" 2>/dev/null) || continue; case "$TARGET" in *"/agsbx/x"*) kill "$(basename "$P")" 2>/dev/null ;; esac; done
-kill -15 $(pgrep -f 'agsbx/x' 2>/dev/null) >/dev/null 2>&1
-upxray && xrestart && echo "Xray内核更新完成" && sleep 2 && cip
-exit
+    for P in /proc/[0-9]*; do
+        [ -L "$P/exe" ] || continue
+        TARGET=$(readlink -f "$P/exe" 2>/dev/null) || continue
+        case "$TARGET" in
+            *"/agsbx/x"*) kill "$(basename "$P")" 2>/dev/null ;;
+        esac
+    done
+
+    if upxray; then
+        xrestart
+        echo "Xray固定内核更新完成"
+        sleep 2
+        cip
+    else
+        echo "Xray固定内核校验失败，已保留原内核"
+        xrestart
+    fi
+    exit
+
 elif [ "$1" = "ups" ]; then
-for P in /proc/[0-9]*; do [ -L "$P/exe" ] || continue; TARGET=$(readlink -f "$P/exe" 2>/dev/null) || continue; case "$TARGET" in *"/agsbx/s"*) kill "$(basename "$P")" 2>/dev/null ;; esac; done
-kill -15 $(pgrep -f 'agsbx/s' 2>/dev/null) >/dev/null 2>&1
-upsingbox && sbrestart && echo "Sing-box内核更新完成" && sleep 2 && cip
-exit
+    for P in /proc/[0-9]*; do
+        [ -L "$P/exe" ] || continue
+        TARGET=$(readlink -f "$P/exe" 2>/dev/null) || continue
+        case "$TARGET" in
+            *"/agsbx/s"*) kill "$(basename "$P")" 2>/dev/null ;;
+        esac
+    done
+
+    if upsingbox; then
+        sbrestart
+        echo "Sing-box固定内核更新完成"
+        sleep 2
+        cip
+    else
+        echo "Sing-box固定内核校验失败，已保留原内核"
+        sbrestart
+    fi
+    exit
 elif [ "$1" = "res" ]; then
 for P in /proc/[0-9]*; do
 [ -L "$P/exe" ] || continue
