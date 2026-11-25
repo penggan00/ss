@@ -25,9 +25,9 @@ usage() {
   -h, --help         显示帮助
 
 示例:
-  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -p 51200,51201
-  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -6 2001:db8::10 -p 51200,51201
-  curl -fsSL 脚本地址 | sudo bash -s -- -6 2001:db8::10 -p 51200,51201
+  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -p 5200,5201
+  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -6 2001:db8::10 -p 5200,5201
+  curl -fsSL 脚本地址 | sudo bash -s -- -6 2001:db8::10 -p 5200,5201
 EOF
 }
 
@@ -87,7 +87,7 @@ if [[ -z "$IP4" && -z "$IP6" ]]; then
 fi
 
 if [[ -z "$PORTS" && -z "$HY_PORT" && -z "$VMS_PORT" ]]; then
-  echo "错误：必须使用 -p 传入端口，例如 -p 51200,51201"
+  echo "错误：必须使用 -p 传入端口，例如 -p 5200,5201"
   usage
   exit 1
 fi
@@ -122,7 +122,7 @@ if [[ -n "$PORTS" ]]; then
   IFS=',' read -r -a PORT_ARRAY <<< "$PORTS"
 
   if ((${#PORT_ARRAY[@]} != 2)); then
-    echo "错误：-p 需要恰好两个端口，例如 -p 51200,51201"
+    echo "错误：-p 需要恰好两个端口，例如 -p 5200,5201"
     exit 1
   fi
 
