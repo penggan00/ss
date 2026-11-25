@@ -4,30 +4,21 @@ set -euo pipefail
 IP4=""
 IP6=""
 PORTS=""
-HY_PORT=""
-VMS_PORT=""
-HY_PROTO="udp"
-VMS_PROTO="tcp"
 
 usage() {
   cat <<'EOF'
 用法:
-  bash nat.sh -4 IPv4 [-6 IPv6] -p HY端口,VMess端口 [选项]
+  sudo bash nat.sh -4 IPv4 [-6 IPv6] -p 端口/协议[,端口/协议...]
 
 选项:
-  -4 <IPv4>          设置落地机 IPv4
-  -6 <IPv6>          设置落地机 IPv6
-  -p <端口列表>      格式：HY端口,VMess端口
-  --hy-port <端口>   单独指定 HY 端口
-  --hy-proto <协议>  HY 协议：tcp 或 udp，默认 udp
-  --vms-port <端口>  单独指定 VMess 端口
-  --vms-proto <协议> VMess 协议：tcp 或 udp，默认 tcp
-  -h, --help         显示帮助
+  -4 <IPv4>       设置落地机 IPv4
+  -6 <IPv6>       设置落地机 IPv6
+  -p <规则列表>   格式：51210/udp,51211/udp,60000/tcp
+  -h, --help      显示帮助
 
 示例:
-  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -p 5200,5201
-  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -6 2001:db8::10 -p 5200,5201
-  curl -fsSL 脚本地址 | sudo bash -s -- -6 2001:db8::10 -p 5200,5201
+  sudo bash nat.sh -4 203.0.113.101 -p 51210/udp,51211/udp,60000/tcp
+  sudo bash nat.sh -4 203.0.113.101 -6 2001:db8::10 -p 51210/udp,60000/tcp
 EOF
 }
 
@@ -44,28 +35,8 @@ while (($#)); do
       shift 2
       ;;
     -p|--ports)
-      [[ $# -ge 2 ]] || { echo "错误：-p 缺少端口"; exit 1; }
+      [[ $# -ge 2 ]] || { echo "错误：-p 缺少规则"; exit 1; }
       PORTS="$2"
-      shift 2
-      ;;
-    --hy-port)
-      [[ $# -ge 2 ]] || { echo "错误：--hy-port 缺少端口"; exit 1; }
-      HY_PORT="$2"
-      shift 2
-      ;;
-    --hy-proto)
-      [[ $# -ge 2 ]] || { echo "错误：--hy-proto 缺少协议"; exit 1; }
-      HY_PROTO="$2"
-      shift 2
-      ;;
-    --vms-port)
-      [[ $# -ge 2 ]] || { echo "错误：--vms-port 缺少端口"; exit 1; }
-      VMS_PORT="$2"
-      shift 2
-      ;;
-    --vms-proto)
-      [[ $# -ge 2 ]] || { echo "错误：--vms-proto 缺少协议"; exit 1; }
-      VMS_PROTO="$2"
       shift 2
       ;;
     -h|--help)
@@ -73,67 +44,54 @@ while (($#)); do
       exit 0
       ;;
     *)
-      echo "错误：未知参数 $1"
+      echo "错误：未知参数：$1"
       usage
       exit 1
       ;;
   esac
 done
 
-if [[ -z "$IP4" && -z "$IP6" ]]; then
-  echo "错误：必须使用 -4、-6 或同时使用两者指定落地机地址"
-  usage
+[[ -n "$IP4" || -n "$IP6" ]] ||
+  { echo "错误：必须使用 -4、-6 或同时使用两者指定落地机地址"; exit 1; }
+
+[[ -n "$PORTS" ]] ||
+  { echo "错误：必须使用 -p，例如 -p 51210/udp,60000/tcp"; exit 1; }
+
+[[ $EUID -eq 0 ]] ||
+  { echo "错误：请使用 root 权限运行"; exit 1; }
+
+# 校验端口和协议格式。
+if [[ ! "$PORTS" =~ ^[0-9]+/(tcp|udp)(,[0-9]+/(tcp|udp))*$ ]]; then
+  echo "错误：-p 格式无效，请使用端口/协议，例如 51210/udp,60000/tcp"
   exit 1
 fi
 
-if [[ -z "$PORTS" && -z "$HY_PORT" && -z "$VMS_PORT" ]]; then
-  echo "错误：必须使用 -p 传入端口，例如 -p 5200,5201"
-  usage
-  exit 1
-fi
+IFS=',' read -r -a RULE_ARRAY <<< "$PORTS"
+declare -A RULE_SET=()
+NORMALIZED_RULES=()
 
-if [[ $EUID -ne 0 ]]; then
-  echo "错误：请使用 root 权限运行"
-  exit 1
-fi
+for rule in "${RULE_ARRAY[@]}"; do
+  port="${rule%/*}"
+  proto="${rule##*/}"
 
-validate_port() {
-  local name="$1"
-  local value="$2"
-
-  if [[ ! "$value" =~ ^[0-9]+$ ]] ||
-     ((10#$value < 1 || 10#$value > 65535)); then
-    echo "错误：$name 的端口无效：$value"
-    exit 1
-  fi
-}
-
-validate_proto() {
-  local name="$1"
-  local value="$2"
-
-  if [[ "$value" != "tcp" && "$value" != "udp" ]]; then
-    echo "错误：$name 协议只能是 tcp 或 udp"
-    exit 1
-  fi
-}
-
-if [[ -n "$PORTS" ]]; then
-  IFS=',' read -r -a PORT_ARRAY <<< "$PORTS"
-
-  if ((${#PORT_ARRAY[@]} != 2)); then
-    echo "错误：-p 需要恰好两个端口，例如 -p 5200,5201"
+  if ((10#$port < 1 || 10#$port > 65535)); then
+    echo "错误：端口必须在 1–65535 范围内：$port"
     exit 1
   fi
 
-  HY_PORT="${HY_PORT:-${PORT_ARRAY[0]}}"
-  VMS_PORT="${VMS_PORT:-${PORT_ARRAY[1]}}"
-fi
+  port="$((10#$port))"
+  normalized="$port/$proto"
 
-validate_port "HY_PORT" "$HY_PORT"
-validate_port "VMS_PORT" "$VMS_PORT"
-validate_proto "HY_PROTO" "$HY_PROTO"
-validate_proto "VMS_PROTO" "$VMS_PROTO"
+  if [[ -n "${RULE_SET[$normalized]+x}" ]]; then
+    echo "错误：重复规则：$normalized"
+    exit 1
+  fi
+
+  RULE_SET["$normalized"]=1
+  NORMALIZED_RULES+=("$normalized")
+done
+
+PORTS="$(IFS=,; echo "${NORMALIZED_RULES[*]}")"
 
 detect_distro() {
   if [[ -f /etc/alpine-release ]]; then
@@ -153,7 +111,10 @@ detect_distro() {
 
 DISTRO="$(detect_distro)"
 
-install_packages() {
+if ! command -v python3 >/dev/null 2>&1 ||
+   ! command -v iptables >/dev/null 2>&1 ||
+   ! command -v sysctl >/dev/null 2>&1 ||
+   { [[ -n "$IP6" ]] && ! command -v ip6tables >/dev/null 2>&1; }; then
   echo "检测到缺少依赖，正在自动安装..."
 
   case "$DISTRO" in
@@ -180,33 +141,6 @@ install_packages() {
       exit 1
       ;;
   esac
-}
-
-NEED_INSTALL=0
-for cmd in python3 iptables sysctl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    NEED_INSTALL=1
-  fi
-done
-
-if [[ -n "$IP6" ]] && ! command -v ip6tables >/dev/null 2>&1; then
-  NEED_INSTALL=1
-fi
-
-if ((NEED_INSTALL)); then
-  install_packages
-fi
-
-for cmd in python3 iptables sysctl; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    echo "错误：安装后仍缺少命令 $cmd"
-    exit 1
-  fi
-done
-
-if [[ -n "$IP6" ]] && ! command -v ip6tables >/dev/null 2>&1; then
-  echo "错误：IPv6 转发需要 ip6tables，但安装后仍未找到"
-  exit 1
 fi
 
 python3 - "$IP4" "$IP6" <<'PY'
@@ -230,15 +164,10 @@ if ip6:
 PY
 
 mkdir -p /etc/relay-forward
-chmod 755 /etc/relay-forward
-
 cat > /etc/relay-forward/config <<EOF
 IP4='$IP4'
 IP6='$IP6'
-HY_PORT='$HY_PORT'
-VMS_PORT='$VMS_PORT'
-HY_PROTO='$HY_PROTO'
-VMS_PROTO='$VMS_PROTO'
+PORTS='$PORTS'
 EOF
 chmod 600 /etc/relay-forward/config
 
@@ -248,9 +177,8 @@ set -euo pipefail
 source /etc/relay-forward/config
 
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
-if [[ -n "$IP6" ]]; then
+[[ -z "$IP6" ]] ||
   sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
-fi
 
 setup_family() {
   local iptables_bin="$1"
@@ -281,14 +209,15 @@ setup_family() {
   "$iptables_bin" -t filter -A "$forward" \
     -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-  forward_port() {
-    local proto="$1"
-    local port="$2"
-    local destination="$target:$port"
+  IFS=',' read -r -a rules <<< "$PORTS"
 
-    if [[ "$family" == "V6" ]]; then
+  for rule in "${rules[@]}"; do
+    proto="${rule##*/}"
+    port="${rule%/*}"
+    destination="$target:$port"
+
+    [[ "$family" != "V6" ]] ||
       destination="[$target]:$port"
-    fi
 
     "$iptables_bin" -t nat -A "$pre" \
       -p "$proto" --dport "$port" \
@@ -301,19 +230,14 @@ setup_family() {
     "$iptables_bin" -t filter -A "$forward" \
       -p "$proto" -d "$target" --dport "$port" \
       -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
-  }
-
-  forward_port "$HY_PROTO" "$HY_PORT"
-  forward_port "$VMS_PROTO" "$VMS_PORT"
+  done
 }
 
-if [[ -n "$IP4" ]]; then
+[[ -z "$IP4" ]] ||
   setup_family iptables V4 "$IP4"
-fi
 
-if [[ -n "$IP6" ]]; then
+[[ -z "$IP6" ]] ||
   setup_family ip6tables V6 "$IP6"
-fi
 APPLY
 chmod 755 /usr/local/sbin/relay-forward-apply
 
@@ -321,19 +245,14 @@ mkdir -p /etc/sysctl.d
 cat > /etc/sysctl.d/99-relay-forward.conf <<EOF
 net.ipv4.ip_forward=1
 EOF
-
 if [[ -n "$IP6" ]]; then
   cat >> /etc/sysctl.d/99-relay-forward.conf <<'EOF'
 net.ipv6.conf.all.forwarding=1
 EOF
 fi
-chmod 644 /etc/sysctl.d/99-relay-forward.conf
 sysctl -p /etc/sysctl.d/99-relay-forward.conf >/dev/null
 
 if [[ -f /etc/alpine-release ]]; then
-  cat >> /etc/sysctl.conf.tmp 2>/dev/null <<EOF
-EOF
-
   touch /etc/sysctl.conf
   sed -i '/^net\.ipv4\.ip_forward=/d' /etc/sysctl.conf
   echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
@@ -390,12 +309,10 @@ fi
 
 echo
 echo "转发规则已安装并启用开机恢复"
-echo "HY:     $HY_PROTO/$HY_PORT"
-echo "VMess:  $VMS_PROTO/$VMS_PORT"
+[[ -z "$IP4" ]] || echo "IPv4 落地机：$IP4"
+[[ -z "$IP6" ]] || echo "IPv6 落地机：$IP6"
 
-if [[ -n "$IP4" ]]; then
-  echo "IPv4:   $IP4"
-fi
-if [[ -n "$IP6" ]]; then
-  echo "IPv6:   $IP6"
-fi
+echo "转发规则："
+for rule in "${NORMALIZED_RULES[@]}"; do
+  echo "  $rule"
+done

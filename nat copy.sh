@@ -1,590 +1,401 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-### ====== 颜色定义 ======
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+IP4=""
+IP6=""
+PORTS=""
+HY_PORT=""
+VMS_PORT=""
+HY_PROTO="udp"
+VMS_PROTO="tcp"
 
-### ====== 配置参数（可自定义） ======
-# 配置文件路径
-CONFIG_FILE="/etc/transit-proxy/config.conf"
-# 白名单配置文件
-WHITELIST_FILE="/etc/transit-proxy/whitelist.conf"
-# 默认值
-DEFAULT_TRANSIT_PORT=51300
-DEFAULT_LANDING_PORT=51200
-
-### ====== 显示帮助 ======
-show_help() {
-    cat << EOF
-${GREEN}中转服务器配置脚本${NC}
-
+usage() {
+  cat <<'EOF'
 用法:
-  $0 [选项]
+  bash nat.sh -4 IPv4 [-6 IPv6] -p HY端口,VMess端口 [选项]
 
 选项:
-  -4 <IP>        设置 IPv4 地址
-  -6 <IP>        设置 IPv6 地址
-  -p <端口列表>   设置开放端口（用逗号分隔，如: 80,443,222）
-  -w <IP列表>     设置白名单IP（用逗号分隔，这些IP可以访问所有端口）
-  -t <端口>       设置中转端口（默认: 51300）
-  -l <端口>       设置落地端口（默认: 51200）
-  -s              显示当前配置
-  -d              删除所有规则
-  -h              显示此帮助
+  -4 <IPv4>          设置落地机 IPv4
+  -6 <IPv6>          设置落地机 IPv6
+  -p <端口列表>      格式：HY端口,VMess端口
+  --hy-port <端口>   单独指定 HY 端口
+  --hy-proto <协议>  HY 协议：tcp 或 udp，默认 udp
+  --vms-port <端口>  单独指定 VMess 端口
+  --vms-proto <协议> VMess 协议：tcp 或 udp，默认 tcp
+  -h, --help         显示帮助
 
 示例:
-  $0 -4 72.18.81.15 -6 2607:f130:0:18e::17dd:18a0 -p 80,443,222 -w 1.2.3.4,5.6.7.8
-  $0 -4 72.18.81.15 -p 80,443,222 -w 1.2.3.4
-  $0 -d  # 删除所有规则
+  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -p 5200,5201
+  curl -fsSL 脚本地址 | sudo bash -s -- -4 203.0.113.10 -6 2001:db8::10 -p 5200,5201
+  curl -fsSL 脚本地址 | sudo bash -s -- -6 2001:db8::10 -p 5200,5201
 EOF
 }
 
-### ====== 解析命令行参数 ======
-parse_args() {
-    # 初始化变量
-    LANDING_IPV4=""
-    LANDING_IPV6=""
-    OPEN_PORTS=()
-    WHITELIST_IPS=()
-    TRANSIT_PORT=$DEFAULT_TRANSIT_PORT
-    LANDING_PORT=$DEFAULT_LANDING_PORT
-    SHOW_CONFIG=0
-    DELETE_RULES=0
-    
-    while getopts "4:6:p:w:t:l:sdh" opt; do
-        case $opt in
-            4)
-                LANDING_IPV4="$OPTARG"
-                ;;
-            6)
-                LANDING_IPV6="$OPTARG"
-                ;;
-            p)
-                IFS=',' read -ra OPEN_PORTS <<< "$OPTARG"
-                ;;
-            w)
-                IFS=',' read -ra WHITELIST_IPS <<< "$OPTARG"
-                ;;
-            t)
-                TRANSIT_PORT="$OPTARG"
-                ;;
-            l)
-                LANDING_PORT="$OPTARG"
-                ;;
-            s)
-                SHOW_CONFIG=1
-                ;;
-            d)
-                DELETE_RULES=1
-                ;;
-            h)
-                show_help
-                exit 0
-                ;;
-            \?)
-                echo -e "${RED}错误:${NC} 无效选项"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-    
-    # 如果只显示配置，不需要验证其他参数
-    if [ $SHOW_CONFIG -eq 1 ]; then
-        return
-    fi
-    
-    # 如果删除规则，不需要验证IP
-    if [ $DELETE_RULES -eq 1 ]; then
-        return
-    fi
-    
-    # 验证必需参数
-    if [ -z "$LANDING_IPV4" ] && [ -z "$LANDING_IPV6" ]; then
-        echo -e "${RED}错误:${NC} 至少需要指定一个 IPv4 或 IPv6 地址"
-        show_help
-        exit 1
-    fi
-    
-    if [ ${#OPEN_PORTS[@]} -eq 0 ] && [ ${#WHITELIST_IPS[@]} -eq 0 ]; then
-        echo -e "${RED}错误:${NC} 请指定开放端口或白名单IP"
-        show_help
-        exit 1
-    fi
+while (($#)); do
+  case "$1" in
+    -4)
+      [[ $# -ge 2 ]] || { echo "错误：-4 缺少地址"; exit 1; }
+      IP4="$2"
+      shift 2
+      ;;
+    -6)
+      [[ $# -ge 2 ]] || { echo "错误：-6 缺少地址"; exit 1; }
+      IP6="$2"
+      shift 2
+      ;;
+    -p|--ports)
+      [[ $# -ge 2 ]] || { echo "错误：-p 缺少端口"; exit 1; }
+      PORTS="$2"
+      shift 2
+      ;;
+    --hy-port)
+      [[ $# -ge 2 ]] || { echo "错误：--hy-port 缺少端口"; exit 1; }
+      HY_PORT="$2"
+      shift 2
+      ;;
+    --hy-proto)
+      [[ $# -ge 2 ]] || { echo "错误：--hy-proto 缺少协议"; exit 1; }
+      HY_PROTO="$2"
+      shift 2
+      ;;
+    --vms-port)
+      [[ $# -ge 2 ]] || { echo "错误：--vms-port 缺少端口"; exit 1; }
+      VMS_PORT="$2"
+      shift 2
+      ;;
+    --vms-proto)
+      [[ $# -ge 2 ]] || { echo "错误：--vms-proto 缺少协议"; exit 1; }
+      VMS_PROTO="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "错误：未知参数 $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$IP4" && -z "$IP6" ]]; then
+  echo "错误：必须使用 -4、-6 或同时使用两者指定落地机地址"
+  usage
+  exit 1
+fi
+
+if [[ -z "$PORTS" && -z "$HY_PORT" && -z "$VMS_PORT" ]]; then
+  echo "错误：必须使用 -p 传入端口，例如 -p 5200,5201"
+  usage
+  exit 1
+fi
+
+if [[ $EUID -ne 0 ]]; then
+  echo "错误：请使用 root 权限运行"
+  exit 1
+fi
+
+validate_port() {
+  local name="$1"
+  local value="$2"
+
+  if [[ ! "$value" =~ ^[0-9]+$ ]] ||
+     ((10#$value < 1 || 10#$value > 65535)); then
+    echo "错误：$name 的端口无效：$value"
+    exit 1
+  fi
 }
 
-### ====== 加载/保存配置 ======
-load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-        echo -e "${GREEN}>>>${NC} 已加载配置文件: $CONFIG_FILE"
-    fi
-    if [ -f "$WHITELIST_FILE" ]; then
-        source "$WHITELIST_FILE"
-        echo -e "${GREEN}>>>${NC} 已加载白名单: $WHITELIST_FILE"
-    fi
+validate_proto() {
+  local name="$1"
+  local value="$2"
+
+  if [[ "$value" != "tcp" && "$value" != "udp" ]]; then
+    echo "错误：$name 协议只能是 tcp 或 udp"
+    exit 1
+  fi
 }
 
-save_config() {
-    local config_dir=$(dirname "$CONFIG_FILE")
-    mkdir -p "$config_dir"
-    
-    cat > "$CONFIG_FILE" << EOF
-# 中转代理配置文件
-# 最后更新: $(date)
+if [[ -n "$PORTS" ]]; then
+  IFS=',' read -r -a PORT_ARRAY <<< "$PORTS"
 
-# IPv4 地址
-LANDING_IPV4="$LANDING_IPV4"
+  if ((${#PORT_ARRAY[@]} != 2)); then
+    echo "错误：-p 需要恰好两个端口，例如 -p 5200,5201"
+    exit 1
+  fi
 
-# IPv6 地址
-LANDING_IPV6="$LANDING_IPV6"
+  HY_PORT="${HY_PORT:-${PORT_ARRAY[0]}}"
+  VMS_PORT="${VMS_PORT:-${PORT_ARRAY[1]}}"
+fi
 
-# 开放端口
-OPEN_PORTS=(${OPEN_PORTS[*]})
+validate_port "HY_PORT" "$HY_PORT"
+validate_port "VMS_PORT" "$VMS_PORT"
+validate_proto "HY_PROTO" "$HY_PROTO"
+validate_proto "VMS_PROTO" "$VMS_PROTO"
 
-# 中转端口
-TRANSIT_PORT="$TRANSIT_PORT"
+detect_distro() {
+  if [[ -f /etc/alpine-release ]]; then
+    echo alpine
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo debian
+  elif command -v dnf >/dev/null 2>&1; then
+    echo fedora
+  elif command -v yum >/dev/null 2>&1; then
+    echo redhat
+  elif command -v zypper >/dev/null 2>&1; then
+    echo opensuse
+  else
+    echo unknown
+  fi
+}
 
-# 落地端口
-LANDING_PORT="$LANDING_PORT"
+DISTRO="$(detect_distro)"
+
+install_packages() {
+  echo "检测到缺少依赖，正在自动安装..."
+
+  case "$DISTRO" in
+    alpine)
+      apk add --no-cache python3 iptables procps kmod
+      ;;
+    debian)
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y python3 iptables procps kmod
+      ;;
+    fedora)
+      dnf install -y python3 iptables procps-ng kmod
+      ;;
+    redhat)
+      yum install -y python3 iptables procps-ng kmod
+      ;;
+    opensuse)
+      zypper --non-interactive install -y python3 iptables procps kmod
+      ;;
+    *)
+      echo "错误：无法识别包管理器"
+      echo "请手动安装 python3、iptables、sysctl 和 kmod"
+      exit 1
+      ;;
+  esac
+}
+
+NEED_INSTALL=0
+for cmd in python3 iptables sysctl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    NEED_INSTALL=1
+  fi
+done
+
+if [[ -n "$IP6" ]] && ! command -v ip6tables >/dev/null 2>&1; then
+  NEED_INSTALL=1
+fi
+
+if ((NEED_INSTALL)); then
+  install_packages
+fi
+
+for cmd in python3 iptables sysctl; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "错误：安装后仍缺少命令 $cmd"
+    exit 1
+  fi
+done
+
+if [[ -n "$IP6" ]] && ! command -v ip6tables >/dev/null 2>&1; then
+  echo "错误：IPv6 转发需要 ip6tables，但安装后仍未找到"
+  exit 1
+fi
+
+python3 - "$IP4" "$IP6" <<'PY'
+import ipaddress
+import sys
+
+ip4 = sys.argv[1]
+ip6 = sys.argv[2]
+
+if ip4:
+    try:
+        ipaddress.IPv4Address(ip4)
+    except ValueError:
+        sys.exit(f"错误：-4 地址无效：{ip4}")
+
+if ip6:
+    try:
+        ipaddress.IPv6Address(ip6)
+    except ValueError:
+        sys.exit(f"错误：-6 地址无效：{ip6}")
+PY
+
+mkdir -p /etc/relay-forward
+chmod 755 /etc/relay-forward
+
+cat > /etc/relay-forward/config <<EOF
+IP4='$IP4'
+IP6='$IP6'
+HY_PORT='$HY_PORT'
+VMS_PORT='$VMS_PORT'
+HY_PROTO='$HY_PROTO'
+VMS_PROTO='$VMS_PROTO'
 EOF
-    echo -e "${GREEN}>>>${NC} 配置已保存到: $CONFIG_FILE"
-    
-    # 保存白名单
-    if [ ${#WHITELIST_IPS[@]} -gt 0 ]; then
-        cat > "$WHITELIST_FILE" << EOF
-# IP白名单配置文件
-# 最后更新: $(date)
+chmod 600 /etc/relay-forward/config
 
-# 白名单IP列表（这些IP可以访问所有端口）
-WHITELIST_IPS=(${WHITELIST_IPS[*]})
+cat > /usr/local/sbin/relay-forward-apply <<'APPLY'
+#!/usr/bin/env bash
+set -euo pipefail
+source /etc/relay-forward/config
+
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+if [[ -n "$IP6" ]]; then
+  sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null
+fi
+
+setup_family() {
+  local iptables_bin="$1"
+  local family="$2"
+  local target="$3"
+
+  local pre="RELAY_${family}_PRE"
+  local post="RELAY_${family}_POST"
+  local forward="RELAY_${family}_FORWARD"
+
+  "$iptables_bin" -t nat -N "$pre" 2>/dev/null || true
+  "$iptables_bin" -t nat -N "$post" 2>/dev/null || true
+  "$iptables_bin" -t filter -N "$forward" 2>/dev/null || true
+
+  "$iptables_bin" -t nat -F "$pre"
+  "$iptables_bin" -t nat -F "$post"
+  "$iptables_bin" -t filter -F "$forward"
+
+  "$iptables_bin" -t nat -C PREROUTING -j "$pre" 2>/dev/null ||
+    "$iptables_bin" -t nat -I PREROUTING 1 -j "$pre"
+
+  "$iptables_bin" -t nat -C POSTROUTING -j "$post" 2>/dev/null ||
+    "$iptables_bin" -t nat -I POSTROUTING 1 -j "$post"
+
+  "$iptables_bin" -t filter -C FORWARD -j "$forward" 2>/dev/null ||
+    "$iptables_bin" -t filter -I FORWARD 1 -j "$forward"
+
+  "$iptables_bin" -t filter -A "$forward" \
+    -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+  forward_port() {
+    local proto="$1"
+    local port="$2"
+    local destination="$target:$port"
+
+    if [[ "$family" == "V6" ]]; then
+      destination="[$target]:$port"
+    fi
+
+    "$iptables_bin" -t nat -A "$pre" \
+      -p "$proto" --dport "$port" \
+      -j DNAT --to-destination "$destination"
+
+    "$iptables_bin" -t nat -A "$post" \
+      -p "$proto" -d "$target" --dport "$port" \
+      -j MASQUERADE
+
+    "$iptables_bin" -t filter -A "$forward" \
+      -p "$proto" -d "$target" --dport "$port" \
+      -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT
+  }
+
+  forward_port "$HY_PROTO" "$HY_PORT"
+  forward_port "$VMS_PROTO" "$VMS_PORT"
+}
+
+if [[ -n "$IP4" ]]; then
+  setup_family iptables V4 "$IP4"
+fi
+
+if [[ -n "$IP6" ]]; then
+  setup_family ip6tables V6 "$IP6"
+fi
+APPLY
+chmod 755 /usr/local/sbin/relay-forward-apply
+
+mkdir -p /etc/sysctl.d
+cat > /etc/sysctl.d/99-relay-forward.conf <<EOF
+net.ipv4.ip_forward=1
 EOF
-        echo -e "${GREEN}>>>${NC} 白名单已保存到: $WHITELIST_FILE"
-    fi
+
+if [[ -n "$IP6" ]]; then
+  cat >> /etc/sysctl.d/99-relay-forward.conf <<'EOF'
+net.ipv6.conf.all.forwarding=1
+EOF
+fi
+chmod 644 /etc/sysctl.d/99-relay-forward.conf
+sysctl -p /etc/sysctl.d/99-relay-forward.conf >/dev/null
+
+if [[ -f /etc/alpine-release ]]; then
+  cat >> /etc/sysctl.conf.tmp 2>/dev/null <<EOF
+EOF
+
+  touch /etc/sysctl.conf
+  sed -i '/^net\.ipv4\.ip_forward=/d' /etc/sysctl.conf
+  echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
+
+  if [[ -n "$IP6" ]]; then
+    sed -i '/^net\.ipv6\.conf\.all\.forwarding=/d' /etc/sysctl.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
+  fi
+
+  cat > /etc/init.d/relay-forward <<'OPENRC'
+#!/sbin/openrc-run
+description="Relay IPv4 and IPv6 port forwarding"
+
+depend() {
+  need net
+  after firewall
 }
 
-show_current_config() {
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}        当前配置信息${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${BLUE}IPv4 地址:${NC} ${LANDING_IPV4:-未设置}"
-    echo -e "${BLUE}IPv6 地址:${NC} ${LANDING_IPV6:-未设置}"
-    echo -e "${BLUE}开放端口:${NC} ${OPEN_PORTS[*]:-无}"
-    echo -e "${BLUE}白名单IP:${NC} ${WHITELIST_IPS[*]:-无}"
-    echo -e "${BLUE}中转端口:${NC} $TRANSIT_PORT -> $LANDING_PORT"
-    
-    # 显示当前生效的iptables规则
-    echo -e "\n${BLUE}当前生效的规则:${NC}"
-    
-    # 显示白名单规则
-    echo -e "${YELLOW}  白名单IP:${NC}"
-    iptables -L INPUT -n | grep -E "ACCEPT.*all.*--.*[0-9]" | grep -v "state\|lo\|icmp" || echo "    无"
-    
-    # 显示开放端口规则
-    echo -e "${YELLOW}  开放端口:${NC}"
-    iptables -L INPUT -n | grep -E "ACCEPT.*dpt" || echo "    无"
-    
-    # 显示DNAT规则
-    echo -e "${YELLOW}  DNAT规则:${NC}"
-    iptables -t nat -L PREROUTING -n | grep -E "DNAT.*$TRANSIT_PORT" || echo "    无"
-    ip6tables -t nat -L PREROUTING -n | grep -E "DNAT.*$TRANSIT_PORT" 2>/dev/null || echo "    无"
-    
-    echo -e "${GREEN}========================================${NC}"
+start() {
+  ebegin "Applying relay forwarding rules"
+  /usr/local/sbin/relay-forward-apply
+  eend $?
 }
 
-### ====== 删除所有规则 ======
-delete_all_rules() {
-    echo -e "${YELLOW}>>>${NC} 开始删除所有中转规则..."
-    
-    # 如果配置文件存在，加载配置以便知道要删除哪些规则
-    if [ -f "$CONFIG_FILE" ]; then
-        source "$CONFIG_FILE"
-    fi
-    
-    # 删除IPv4规则
-    echo -e "${BLUE}  删除 IPv4 规则...${NC}"
-    
-    # 清空所有自定义规则（保留默认策略）
-    iptables -F INPUT 2>/dev/null || true
-    iptables -F FORWARD 2>/dev/null || true
-    iptables -t nat -F PREROUTING 2>/dev/null || true
-    iptables -t nat -F POSTROUTING 2>/dev/null || true
-    
-    # 删除特定端口的INPUT规则
-    if [ -n "$LANDING_IPV4" ] && [ ${#OPEN_PORTS[@]} -gt 0 ]; then
-        for port in "${OPEN_PORTS[@]}"; do
-            iptables -D INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || true
-            iptables -D INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
-        done
-    fi
-    
-    # 删除IPv6规则
-    echo -e "${BLUE}  删除 IPv6 规则...${NC}"
-    ip6tables -F INPUT 2>/dev/null || true
-    ip6tables -F FORWARD 2>/dev/null || true
-    ip6tables -t nat -F PREROUTING 2>/dev/null || true
-    ip6tables -t nat -F POSTROUTING 2>/dev/null || true
-    
-    if [ -n "$LANDING_IPV6" ] && [ ${#OPEN_PORTS[@]} -gt 0 ]; then
-        for port in "${OPEN_PORTS[@]}"; do
-            ip6tables -D INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || true
-            ip6tables -D INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
-        done
-    fi
-    
-    # 保存空规则
-    save_rules
-    
-    echo -e "${GREEN}>>>${NC} 所有规则已删除"
+stop() {
+  eend 0
 }
+OPENRC
+  chmod 755 /etc/init.d/relay-forward
+  rc-update add relay-forward default >/dev/null 2>&1 || true
+  rc-service relay-forward restart >/dev/null 2>&1 ||
+    rc-service relay-forward start >/dev/null 2>&1
+else
+  cat > /etc/systemd/system/relay-forward.service <<'SYSTEMD'
+[Unit]
+Description=Relay IPv4 and IPv6 port forwarding
+Wants=network-online.target
+After=network-online.target
 
-### ====== 系统检测 ======
-detect_os() {
-    if [ -f /etc/alpine-release ]; then
-        echo "alpine"
-    elif [ -f /etc/debian_version ]; then
-        echo "debian"
-    elif [ -f /etc/lsb-release ] && grep -q "Ubuntu" /etc/lsb-release; then
-        echo "debian"
-    elif [ -f /etc/os-release ]; then
-        source /etc/os-release
-        if [[ "$ID" == "alpine" ]]; then
-            echo "alpine"
-        elif [[ "$ID" == "debian" || "$ID" == "ubuntu" ]]; then
-            echo "debian"
-        else
-            echo "unknown"
-        fi
-    else
-        echo "unknown"
-    fi
-}
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/relay-forward-apply
+RemainAfterExit=yes
 
-### ====== 保存规则 ======
-save_rules() {
-    OS_TYPE=$(detect_os)
-    
-    case "$OS_TYPE" in
-        "alpine")
-            mkdir -p /etc/iptables
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-            ;;
-        "debian")
-            mkdir -p /etc/iptables
-            iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
-            ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
-            if command -v netfilter-persistent >/dev/null 2>&1; then
-                netfilter-persistent save 2>/dev/null || true
-            fi
-            ;;
-    esac
-    
-    echo -e "${GREEN}>>>${NC} 规则已保存"
-}
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+  chmod 644 /etc/systemd/system/relay-forward.service
+  systemctl daemon-reload
+  systemctl enable --now relay-forward.service
+fi
 
-### ====== 依赖安装 ======
-install_dependencies() {
-    OS_TYPE=$(detect_os)
-    echo -e "${GREEN}>>>${NC} 检测到系统类型: $OS_TYPE"
-    
-    if [ "$OS_TYPE" = "unknown" ]; then
-        echo -e "${RED}错误:${NC} 不支持的操作系统"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}>>>${NC} 检测并安装必要依赖"
-    
-    case "$OS_TYPE" in
-        "alpine")
-            local to_install=""
-            command -v iptables >/dev/null 2>&1 || to_install="$to_install iptables"
-            command -v ip6tables >/dev/null 2>&1 || to_install="$to_install ip6tables"
-            command -v nc >/dev/null 2>&1 || to_install="$to_install netcat-openbsd"
-            command -v ss >/dev/null 2>&1 || to_install="$to_install iproute2"
-            command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || to_install="$to_install curl"
-            
-            if [ -n "$to_install" ]; then
-                echo -e "${BLUE}>>>${NC} 安装依赖: $to_install"
-                apk update 2>/dev/null || true
-                apk add $to_install 2>/dev/null || {
-                    echo -e "${RED}错误:${NC} 依赖安装失败"
-                    exit 1
-                }
-            fi
-            ;;
-            
-        "debian")
-            local to_install=""
-            command -v iptables >/dev/null 2>&1 || to_install="$to_install iptables"
-            command -v nc >/dev/null 2>&1 || to_install="$to_install netcat-openbsd"
-            command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || to_install="$to_install curl"
-            
-            # iptables-persistent 检查
-            if ! dpkg -l | grep -q iptables-persistent; then
-                to_install="$to_install iptables-persistent"
-            fi
-            
-            if [ -n "$to_install" ]; then
-                echo -e "${BLUE}>>>${NC} 安装依赖: $to_install"
-                apt-get update 2>/dev/null || true
-                DEBIAN_FRONTEND=noninteractive apt-get install -y $to_install 2>/dev/null || {
-                    echo -e "${RED}错误:${NC} 依赖安装失败"
-                    exit 1
-                }
-            fi
-            ;;
-    esac
-    
-    echo -e "${GREEN}>>>${NC} 依赖检测完成"
-}
+/usr/local/sbin/relay-forward-apply
 
-### ====== 设置转发 ======
-setup_ip_forward() {
-    echo -e "${GREEN}>>>${NC} 开启 IPv4 / IPv6 转发"
-    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
-    sysctl -w net.ipv6.conf.all.forwarding=1 >/dev/null 2>&1
-    
-    # 永久生效
-    grep -q "net.ipv4.ip_forward" /etc/sysctl.conf || echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-    grep -q "net.ipv6.conf.all.forwarding" /etc/sysctl.conf || echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
-}
+echo
+echo "转发规则已安装并启用开机恢复"
+echo "HY:     $HY_PROTO/$HY_PORT"
+echo "VMess:  $VMS_PROTO/$VMS_PORT"
 
-### ====== 设置规则 ======
-setup_rules() {
-    echo -e "${GREEN}>>>${NC} 开始设置转发规则"
-    
-    # 开启转发
-    setup_ip_forward
-    
-    # 清理旧规则（避免重复）
-    echo -e "${BLUE}  清理旧规则...${NC}"
-    
-    # ====== 设置默认策略为DROP ======
-    echo -e "${YELLOW}  设置默认策略为 DROP（只开放指定端口和白名单IP）...${NC}"
-    
-    # IPv4 默认策略
-    iptables -P INPUT DROP
-    iptables -P FORWARD DROP
-    
-    # IPv6 默认策略（如果设置了IPv6）
-    if [ -n "$LANDING_IPV6" ]; then
-        ip6tables -P INPUT DROP
-        ip6tables -P FORWARD DROP
-    fi
-    
-    # ====== 允许已建立的连接 ======
-    echo -e "${BLUE}  允许已建立的连接...${NC}"
-    iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    if [ -n "$LANDING_IPV6" ]; then
-        ip6tables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-    fi
-    
-    # ====== 允许本地回环接口 ======
-    echo -e "${BLUE}  允许本地回环接口...${NC}"
-    iptables -A INPUT -i lo -j ACCEPT
-    if [ -n "$LANDING_IPV6" ]; then
-        ip6tables -A INPUT -i lo -j ACCEPT
-    fi
-    
-    # ====== 允许ICMP（ping）便于诊断 ======
-    echo -e "${BLUE}  允许ICMP...${NC}"
-    iptables -A INPUT -p icmp -j ACCEPT
-    if [ -n "$LANDING_IPV6" ]; then
-        ip6tables -A INPUT -p ipv6-icmp -j ACCEPT
-    fi
-    
-    # ====== 新增：添加白名单IP（允许访问所有端口） ======
-    if [ ${#WHITELIST_IPS[@]} -gt 0 ]; then
-        echo -e "${BLUE}  添加白名单IP（允许访问所有端口）...${NC}"
-        for ip in "${WHITELIST_IPS[@]}"; do
-            # 验证IP格式
-            if [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-                echo -e "    添加 IPv4 白名单: $ip"
-                iptables -I INPUT 1 -s $ip -j ACCEPT
-            elif [[ $ip =~ ^[0-9a-fA-F:]+$ ]]; then
-                echo -e "    添加 IPv6 白名单: $ip"
-                if [ -n "$LANDING_IPV6" ]; then
-                    ip6tables -I INPUT 1 -s $ip -j ACCEPT
-                fi
-            else
-                echo -e "${YELLOW}    警告: 跳过无效IP格式: $ip${NC}"
-            fi
-        done
-    fi
-    
-    # 开放端口（先删除可能存在的旧规则）
-    echo -e "${BLUE}  设置开放端口...${NC}"
-    for port in "${OPEN_PORTS[@]}"; do
-        # IPv4
-        iptables -D INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || true
-        iptables -D INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
-        iptables -A INPUT -p tcp --dport $port -j ACCEPT
-        iptables -A INPUT -p udp --dport $port -j ACCEPT
-        
-        # IPv6（如果设置了IPv6）
-        if [ -n "$LANDING_IPV6" ]; then
-            ip6tables -D INPUT -p tcp --dport $port -j ACCEPT 2>/dev/null || true
-            ip6tables -D INPUT -p udp --dport $port -j ACCEPT 2>/dev/null || true
-            ip6tables -A INPUT -p tcp --dport $port -j ACCEPT
-            ip6tables -A INPUT -p udp --dport $port -j ACCEPT
-        fi
-    done
-    
-    # 设置IPv4 DNAT规则
-    if [ -n "$LANDING_IPV4" ]; then
-        echo -e "${BLUE}  设置 IPv4 中转规则...${NC}"
-        
-        # 清理旧规则
-        iptables -t nat -D PREROUTING -p tcp --dport ${TRANSIT_PORT} -j DNAT --to-destination ${LANDING_IPV4}:${LANDING_PORT} 2>/dev/null || true
-        iptables -t nat -D PREROUTING -p udp --dport ${TRANSIT_PORT} -j DNAT --to-destination ${LANDING_IPV4}:${LANDING_PORT} 2>/dev/null || true
-        iptables -t nat -D POSTROUTING -p tcp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j MASQUERADE 2>/dev/null || true
-        iptables -t nat -D POSTROUTING -p udp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j MASQUERADE 2>/dev/null || true
-        
-        # 添加新规则
-        iptables -t nat -A PREROUTING -p tcp --dport ${TRANSIT_PORT} -j DNAT --to-destination ${LANDING_IPV4}:${LANDING_PORT}
-        iptables -t nat -A PREROUTING -p udp --dport ${TRANSIT_PORT} -j DNAT --to-destination ${LANDING_IPV4}:${LANDING_PORT}
-        iptables -t nat -A POSTROUTING -p tcp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j MASQUERADE
-        iptables -t nat -A POSTROUTING -p udp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j MASQUERADE
-        
-        # FORWARD 规则
-        iptables -D FORWARD -p tcp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -p tcp -s ${LANDING_IPV4} --sport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -p udp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -p udp -s ${LANDING_IPV4} --sport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        
-        iptables -A FORWARD -p tcp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j ACCEPT
-        iptables -A FORWARD -p tcp -s ${LANDING_IPV4} --sport ${LANDING_PORT} -j ACCEPT
-        iptables -A FORWARD -p udp -d ${LANDING_IPV4} --dport ${LANDING_PORT} -j ACCEPT
-        iptables -A FORWARD -p udp -s ${LANDING_IPV4} --sport ${LANDING_PORT} -j ACCEPT
-    fi
-    
-    # 设置IPv6 DNAT规则
-    if [ -n "$LANDING_IPV6" ]; then
-        echo -e "${BLUE}  设置 IPv6 中转规则...${NC}"
-        
-        # 清理旧规则
-        ip6tables -t nat -D PREROUTING -p tcp --dport ${TRANSIT_PORT} -j DNAT --to-destination [${LANDING_IPV6}]:${LANDING_PORT} 2>/dev/null || true
-        ip6tables -t nat -D PREROUTING -p udp --dport ${TRANSIT_PORT} -j DNAT --to-destination [${LANDING_IPV6}]:${LANDING_PORT} 2>/dev/null || true
-        ip6tables -t nat -D POSTROUTING -p tcp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j MASQUERADE 2>/dev/null || true
-        ip6tables -t nat -D POSTROUTING -p udp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j MASQUERADE 2>/dev/null || true
-        
-        # 添加新规则
-        ip6tables -t nat -A PREROUTING -p tcp --dport ${TRANSIT_PORT} -j DNAT --to-destination [${LANDING_IPV6}]:${LANDING_PORT}
-        ip6tables -t nat -A PREROUTING -p udp --dport ${TRANSIT_PORT} -j DNAT --to-destination [${LANDING_IPV6}]:${LANDING_PORT}
-        ip6tables -t nat -A POSTROUTING -p tcp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j MASQUERADE
-        ip6tables -t nat -A POSTROUTING -p udp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j MASQUERADE
-        
-        # FORWARD 规则
-        ip6tables -D FORWARD -p tcp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        ip6tables -D FORWARD -p tcp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        ip6tables -D FORWARD -p udp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        ip6tables -D FORWARD -p udp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT 2>/dev/null || true
-        
-        ip6tables -A FORWARD -p tcp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j ACCEPT
-        ip6tables -A FORWARD -p tcp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT
-        ip6tables -A FORWARD -p udp -d ${LANDING_IPV6} --dport ${LANDING_PORT} -j ACCEPT
-        ip6tables -A FORWARD -p udp -s ${LANDING_IPV6} --sport ${LANDING_PORT} -j ACCEPT
-    fi
-    
-    echo -e "${GREEN}>>>${NC} 规则设置完成"
-}
-
-### ====== 测试连通性 ======
-test_connectivity() {
-    echo -e "${GREEN}>>>${NC} 开始网络连通性测试"
-    
-    if [ -n "$LANDING_IPV4" ]; then
-        echo -e "${BLUE}   测试目标服务器 IPv4 连通性...${NC}"
-        if timeout 3 ping -c 2 "$LANDING_IPV4" >/dev/null 2>&1; then
-            echo -e "${GREEN}      ✓ IPv4 可达${NC}"
-        else
-            echo -e "${YELLOW}      ⚠ IPv4 可能不可达（或被防火墙阻挡）${NC}"
-        fi
-    fi
-    
-    if [ -n "$LANDING_IPV6" ]; then
-        echo -e "${BLUE}   测试目标服务器 IPv6 连通性...${NC}"
-        if command -v ping6 >/dev/null 2>&1; then
-            if timeout 3 ping6 -c 2 "$LANDING_IPV6" >/dev/null 2>&1; then
-                echo -e "${GREEN}      ✓ IPv6 可达${NC}"
-            else
-                echo -e "${YELLOW}      ⚠ IPv6 可能不可达（或被防火墙阻挡）${NC}"
-            fi
-        else
-            echo -e "${YELLOW}      ⚠ ping6 不可用，跳过 IPv6 连通性测试${NC}"
-        fi
-    fi
-    
-    echo -e "${GREEN}>>>${NC} 连通性测试完成"
-}
-
-### ====== 主函数 ======
-main() {
-    # 解析命令行参数
-    parse_args "$@"
-    
-    # 加载配置文件
-    load_config
-    
-    # 根据选项执行
-    if [ $SHOW_CONFIG -eq 1 ]; then
-        show_current_config
-        exit 0
-    fi
-    
-    if [ $DELETE_RULES -eq 1 ]; then
-        delete_all_rules
-        exit 0
-    fi
-    
-    # 显示配置信息
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}        中转服务器配置脚本${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    
-    if [ -n "$LANDING_IPV4" ]; then
-        echo -e "${BLUE}IPv4 地址:${NC} $LANDING_IPV4"
-    fi
-    if [ -n "$LANDING_IPV6" ]; then
-        echo -e "${BLUE}IPv6 地址:${NC} $LANDING_IPV6"
-    fi
-    echo -e "${BLUE}开放端口:${NC} ${OPEN_PORTS[*]}"
-    echo -e "${BLUE}白名单IP:${NC} ${WHITELIST_IPS[*]:-无}"
-    echo -e "${BLUE}中转端口:${NC} $TRANSIT_PORT -> $LANDING_PORT"
-    echo -e "${GREEN}========================================${NC}"
-    
-    # 安装依赖
-    install_dependencies
-    
-    # 设置规则
-    setup_rules
-    
-    # 保存配置
-    save_config
-    
-    # 保存规则
-    save_rules
-    
-    # 测试连通性
-    test_connectivity
-    
-    echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}>>> 中转规则及端口放行已完成 ✅${NC}"
-    echo -e "${GREEN}>>> 系统重启后规则将自动生效${NC}"
-    echo -e "${GREEN}========================================${NC}"
-    
-    # 显示使用提示
-    echo -e "${YELLOW}使用提示:${NC}"
-    echo -e "  查看当前配置: $0 -s"
-    echo -e "  删除所有规则: $0 -d"
-    echo -e "  修改配置: 重新运行脚本并指定新参数"
-    echo -e "${GREEN}========================================${NC}"
-}
-
-# 执行主函数
-main "$@"
+if [[ -n "$IP4" ]]; then
+  echo "IPv4:   $IP4"
+fi
+if [[ -n "$IP6" ]]; then
+  echo "IPv6:   $IP6"
+fi
