@@ -1,49 +1,53 @@
 #!/bin/bash
-# UFW 一键配置脚本
-echo "alias docker-compose='docker compose'" >> ~/.bashrc && source ~/.bashrc
-echo "开始配置 UFW 防火墙..."
-# 1. 安装 UFW（如果未安装）
-sudo apt-get update
-sudo apt-get install -y ufw
-# 2. 重置 UFW 规则
-echo "重置 UFW 规则..."
-sudo ufw --force reset
-# 3. 设置默认策略
-echo "设置默认策略..."
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-# 4. 开启 IPv6
-sudo sed -i 's/IPV6=no/IPV6=yes/' /etc/default/ufw
-# 5. 允许指定端口
-echo "添加允许的端口规则..."
-# TCP 端口（仅 TCP）
-TCP_ONLY_PORTS="222 80 443"
 
-# 同时需要 TCP 和 UDP 的端口
-BOTH_PORTS="51200 51201 51202 51203"
-# 配置仅 TCP 端口
-for port in $TCP_ONLY_PORTS; do
-    sudo ufw allow $port/tcp comment "TCP port $port"
-    echo "允许 TCP 端口: $port"
+set -euo pipefail
+
+TCP_PORTS="22 222 80 443"
+UDP_PORTS="51200"                  # 按需填写，例如："53 123"
+TCP_UDP_PORTS="51201 51202 51203"
+
+if [[ $EUID -ne 0 ]]; then
+    echo "请使用 sudo 或以 root 身份运行此脚本"
+    exit 1
+fi
+
+echo "开始配置 UFW 防火墙..."
+
+apt-get update
+apt-get install -y ufw
+
+# 远程服务器上先放行当前 SSH 端口，避免断开连接
+if systemctl is-active --quiet ssh 2>/dev/null ||
+   systemctl is-active --quiet sshd 2>/dev/null; then
+    ufw allow 222/tcp comment "SSH port 222"
+fi
+
+ufw --force reset
+ufw default deny incoming
+ufw default allow outgoing
+sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw
+
+echo "添加允许的端口规则..."
+for port in $TCP_PORTS; do
+    ufw allow "${port}/tcp" comment "TCP port ${port}"
 done
-# 配置仅 UDP 端口
-for port in $UDP_ONLY_PORTS; do
-    sudo ufw allow $port/udp comment "UDP port $port"
-    echo "允许 UDP 端口: $port"
+
+for port in $UDP_PORTS; do
+    ufw allow "${port}/udp" comment "UDP port ${port}"
 done
-# 配置同时需要 TCP 和 UDP 的端口
-for port in $BOTH_PORTS; do
-    sudo ufw allow $port comment "TCP/UDP port $port"
-    echo "允许 TCP/UDP 端口: $port"
+
+for port in $TCP_UDP_PORTS; do
+    ufw allow "${port}/tcp" comment "TCP port ${port}"
+    ufw allow "${port}/udp" comment "UDP port ${port}"
 done
-# 6. 启用 UFW
-echo "启用 UFW..."
-sudo ufw --force enable
-# 7. 显示规则
+
+ufw --force enable
+
+echo
 echo "当前 UFW 规则:"
-sudo ufw status numbered
-echo ""
+ufw status numbered
+echo
 echo "UFW 配置完成！"
-echo "使用 'sudo ufw status numbered' 查看规则"
-echo "使用 'sudo ufw delete 规则号' 删除规则"
-echo "使用 'sudo ufw allow 规则号' 增加规则"
+echo "查看规则：sudo ufw status numbered"
+echo "删除规则：sudo ufw delete 规则号"
+echo "添加规则：sudo ufw allow 端口/协议"
