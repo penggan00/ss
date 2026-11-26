@@ -7,7 +7,11 @@ set -e
 [ -z "$SUB" ] && echo "❌ SUB 不能为空" && exit 1
 
 PROXY=$( [ "$CF_PROXY" = "1" ] && echo true || echo false )
-TTL=$( [ -z "$CF_TTL" ] || [ "$CF_TTL" = "auto" ]; echo ${CF_TTL:+$CF_TTL} | grep -q "auto" && echo 1 || echo $CF_TTL )
+if [ -z "$CF_TTL" ] || [ "$CF_TTL" = "auto" ]; then
+    TTL=1
+else
+    TTL="$CF_TTL"
+fi
 
 # ========== 强制 IPv6 模式（新增） ==========
 FORCE_IPV6="${FORCE_IPV6:-0}"
