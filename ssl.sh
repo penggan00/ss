@@ -190,6 +190,12 @@ server {
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
 
+        # 上传和流式响应
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_set_header Range \$http_range;
+        proxy_set_header If-Range \$http_if_range;
+
         proxy_connect_timeout 10s;
         proxy_read_timeout 3600s;
         proxy_send_timeout 3600s;
